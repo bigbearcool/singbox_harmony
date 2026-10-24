@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(singboxbridge)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_SKIP_RPATH TRUE)
+set(CORE_LIB "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${OHOS_ARCH}/libsingbox.so")
+if(NOT EXISTS "${CORE_LIB}")
+ message(FATAL_ERROR "Missing sing-box core. Run bash scripts/build-core.sh first: ${CORE_LIB}")
+endif()
+add_library(singbox SHARED IMPORTED)
+set_target_properties(singbox PROPERTIES IMPORTED_LOCATION "${CORE_LIB}" IMPORTED_NO_SONAME TRUE)
+add_library(singboxbridge SHARED bridge.cpp)
+target_link_libraries(singboxbridge PUBLIC singbox libace_napi.z.so libhilog_ndk.z.so)
+add_custom_command(TARGET singboxbridge POST_BUILD
+ COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CORE_LIB}" "$<TARGET_FILE_DIR:singboxbridge>/libsingbox.so"
+ COMMENT "Package the exact linked sing-box core alongside the N-API bridge")

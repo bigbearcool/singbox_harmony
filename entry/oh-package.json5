@@ -1,0 +1,1 @@
+{"name":"entry","version":"0.1.0","description":"HarmonyOS VPN client","main":"","author":"","license":"GPL-3.0-or-later","dependencies":{"libsingboxbridge.so":"file:./src/main/cpp/types/libsingboxbridge"}}

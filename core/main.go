@@ -1,0 +1,113 @@
+package main
+
+/*
+#include <stdlib.h>
+*/
+import "C"
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"unsafe"
+
+	"github.com/sagernet/sing-box/experimental/libbox"
+)
+
+var lifecycle sync.Mutex
+var running *libbox.CommandServer
+
+type response struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+func result(err error, msg string) *C.char {
+	if err != nil {
+		msg = err.Error()
+	}
+	b, _ := json.Marshal(response{err == nil, msg})
+	return C.CString(string(b))
+}
+
+//export SBFree
+func SBFree(p *C.char) { C.free(unsafe.Pointer(p)) }
+
+//export SBVersion
+func SBVersion() *C.char {
+	return C.CString("sing-box " + libbox.Version() + " · HarmonyOS 原生")
+}
+
+//export SBCheck
+func SBCheck(config *C.char) *C.char {
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	normalized, err := normalizeConfig(C.GoString(config))
+	if err != nil {
+		return result(err, "")
+	}
+	return result(libbox.CheckConfig(normalized), "配置有效")
+}
+
+//export SBStart
+func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char) (res *C.char) {
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			res = result(fmt.Errorf("内核启动异常: %v", r), "")
+		}
+	}()
+	if running != nil {
+		return result(fmt.Errorf("VPN 内核正在运行"), "")
+	}
+	if fd < 0 {
+		return result(fmt.Errorf("无效 TUN 文件描述符"), "")
+	}
+	normalized, err := normalizeConfig(C.GoString(config))
+	if err != nil {
+		return result(err, "")
+	}
+	path := C.GoString(workPath)
+	if err = libbox.Setup(&libbox.SetupOptions{BasePath: path, WorkingPath: path, TempPath: path, LogMaxLines: 100, OomKillerDisabled: true}); err != nil {
+		return result(err, "")
+	}
+	platform := &harmonyPlatform{fd: int32(fd), iface: C.GoString(iface)}
+	server, err := libbox.NewCommandServer(&commandHandler{}, platform)
+	if err != nil {
+		return result(err, "")
+	}
+	// No command listener is opened. The app drives the lifecycle through this ABI.
+	if err = server.StartOrReloadService(normalized, &libbox.OverrideOptions{}); err != nil {
+		server.Close()
+		return result(err, "")
+	}
+	running = server
+	return result(nil, "双栈 TUN 与 sing-box 内核已启动")
+}
+
+//export SBStop
+func SBStop() *C.char {
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	if running != nil {
+		running.Close()
+		running = nil
+	}
+	return result(nil, "已停止")
+}
+
+type commandHandler struct{}
+
+func (*commandHandler) ServiceStop() error   { return nil }
+func (*commandHandler) ServiceReload() error { return fmt.Errorf("请先停止再加载配置") }
+func (*commandHandler) GetSystemProxyStatus() (*libbox.SystemProxyStatus, error) {
+	return &libbox.SystemProxyStatus{}, nil
+}
+func (*commandHandler) SetSystemProxyEnabled(bool) error {
+	return fmt.Errorf("不支持系统 HTTP 代理")
+}
+func (*commandHandler) TriggerNativeCrash() error       { return fmt.Errorf("不支持") }
+func (*commandHandler) WriteDebugMessage(string)        {}
+func (*commandHandler) ConnectSSHAgent() (int32, error) { return -1, fmt.Errorf("不支持") }
+func main()                                             {}

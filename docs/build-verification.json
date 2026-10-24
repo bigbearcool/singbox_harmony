@@ -1,0 +1,18 @@
+{
+  "date": "2026-10-25",
+  "target": "Huawei Mate XTs GRL-AL20 / HarmonyOS 7 / API 26 / arm64-v8a",
+  "singBox": "1.14.3",
+  "ohosGoCommit": "19667c7abfc332f848b5bd1f293e4aeb0e9991a9",
+  "goTests": "go test -race -tags with_gvisor,with_quic,with_utls,with_clash_api ./...: PASS",
+  "coreElf": "AArch64, PT_TLS, R_AARCH64_TLSDESC, no initial-exec TLS: PASS",
+  "hapBuild": "hvigor assembleHap debug: PASS",
+  "hapContents": "Core, N-API bridge, C++ runtime, ABI exports, portable dependency names, no desktop RPATH: PASS",
+  "hapPath": "entry/build/default/outputs/default/entry-default-unsigned.hap",
+  "hapSha256": "910a88898b93fd97fd8f482b999c5e972414ee4aba6296ef388d8099c9b29604",
+  "signed": false,
+  "deviceInstalled": false,
+  "deviceCoreLoaded": "NOT VERIFIED",
+  "ipv6FullTunnel": "NOT VERIFIED",
+  "cellularIpv6": "NOT VERIFIED",
+  "pending": ["Generate project-specific DevEco debugging signature", "Reconnect USB debugging device", "Install signed HAP", "Validate native core and IPv4/IPv6 data plane on device"]
+}
