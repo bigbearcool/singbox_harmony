@@ -3,16 +3,122 @@
   "target": "Huawei Mate XTs GRL-AL20 / HarmonyOS 7 / API 26 / arm64-v8a",
   "singBox": "1.14.3",
   "ohosGoCommit": "19667c7abfc332f848b5bd1f293e4aeb0e9991a9",
-  "goTests": "go test -race -tags with_gvisor,with_quic,with_utls,with_clash_api ./...: PASS",
+  "baselineCommit": "e1ddba9f213215361960414e35465830433c1537",
+  "goTests": {
+    "command": "go test -race -modfile=generated/ohos.mod -tags with_gvisor,with_quic,with_utls,with_clash_api ./...",
+    "result": "PASS"
+  },
   "coreElf": "AArch64, PT_TLS, R_AARCH64_TLSDESC, no initial-exec TLS: PASS",
-  "hapBuild": "hvigor assembleHap debug: PASS",
+  "hapBuild": "hvigor assembleHap debug and SignHap: PASS",
   "hapContents": "Core, N-API bridge, C++ runtime, ABI exports, portable dependency names, no desktop RPATH: PASS",
-  "hapPath": "entry/build/default/outputs/default/entry-default-unsigned.hap",
-  "hapSha256": "910a88898b93fd97fd8f482b999c5e972414ee4aba6296ef388d8099c9b29604",
-  "signed": false,
-  "deviceInstalled": false,
-  "deviceCoreLoaded": "NOT VERIFIED",
-  "ipv6FullTunnel": "NOT VERIFIED",
-  "cellularIpv6": "NOT VERIFIED",
-  "pending": ["Generate project-specific DevEco debugging signature", "Reconnect USB debugging device", "Install signed HAP", "Validate native core and IPv4/IPv6 data plane on device"]
+  "hapPath": "entry/build/default/outputs/default/entry-default-signed.hap",
+  "hapSha256": "173d7452985e0353017f1d32a48323ba1412e0cb206d7ba10a77517d6ef78817",
+  "hapBytes": 61689829,
+  "signed": true,
+  "deviceInstalled": true,
+  "deviceCoreLoaded": true,
+  "diagnosticProfile": "direct outbound; no user proxy credentials",
+  "proxyConfigured": false,
+  "deviceNetwork": {
+    "type": "cellular",
+    "physicalInterface": "rmnet0",
+    "physicalIpv6Present": true,
+    "tunInterface": "vpn-tun",
+    "tunAddresses": [
+      "172.19.0.1/30",
+      "fdfe:dcba:9876::1/126"
+    ],
+    "mtu": 1280
+  },
+  "defaultRoutes": {
+    "connectionProperties": [
+      "0.0.0.0/0",
+      "::/0"
+    ],
+    "ipv6KernelRouteObserved": true
+  },
+  "probeMethod": "ArkTS TCP/UDP sockets explicitly bound to own VPN NetID with OH_NetConn_BindSocket",
+  "positiveProbes": {
+    "ipv4Http": true,
+    "ipv6Http": true,
+    "ipv4UdpDnsA": true,
+    "ipv6UdpDnsAAAA": true
+  },
+  "dnsTargets": {
+    "ipv4": [
+      "192.0.2.53:53",
+      "172.19.0.2:53"
+    ],
+    "ipv6": [
+      "[2001:db8::53]:53",
+      "[fdfe:dcba:9876::2]:53"
+    ],
+    "query": "one.one.one.one",
+    "passingRowRequiresBothTargets": true
+  },
+  "negativeProbe": {
+    "rule": {
+      "ip_cidr": [
+        "::/0"
+      ],
+      "action": "reject"
+    },
+    "ipv4HttpPassed": true,
+    "ipv6HttpPassed": false,
+    "ipv4DnsPassed": true,
+    "ipv6DnsPassed": true,
+    "dnsHijackPrecedesRejectRule": true
+  },
+  "socketBindObservedFailures": 0,
+  "verificationScope": "Dual-stack default routing and core data path on cellular with direct diagnostic profile. Not a claim that all apps, protocols or proxy exits are verified.",
+  "pending": [
+    "Real user proxy profile and remote exit verification",
+    "Other applications without explicit VPN socket binding",
+    "Non-DNS UDP, QUIC and protocol matrix",
+    "Wi-Fi/cellular switching and IPv4-only underlying network",
+    "Long-duration lockscreen, battery and memory/fd stress",
+    "Full authorization denial, invalid profile and abnormal termination device matrix"
+  ],
+  "reconnectCycles": [
+    {
+      "cycle": 1,
+      "connected": true,
+      "ipv6DefaultRoute": true,
+      "stopped": true,
+      "routeRemoved": true
+    },
+    {
+      "cycle": 2,
+      "connected": true,
+      "ipv6DefaultRoute": true,
+      "stopped": true,
+      "routeRemoved": true
+    },
+    {
+      "cycle": 3,
+      "connected": true,
+      "ipv6DefaultRoute": true,
+      "stopped": true,
+      "routeRemoved": true
+    },
+    {
+      "cycle": 4,
+      "connected": true,
+      "ipv6DefaultRoute": true,
+      "stopped": true,
+      "routeRemoved": true
+    },
+    {
+      "cycle": 5,
+      "connected": true,
+      "ipv6DefaultRoute": true,
+      "stopped": true,
+      "routeRemoved": true
+    }
+  ],
+  "finalState": {
+    "vpnConnected": false,
+    "profile": "built-in direct diagnostic",
+    "debugKeepAwake": false
+  }
 }

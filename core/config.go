@@ -9,6 +9,10 @@ import (
 // The system owns addresses/routes. The imported profile owns outbounds and rules.
 // Never allow a profile to replace the dual-stack data plane or expose a listener.
 func normalizeConfig(input string) (string, error) {
+	return normalizeConfigForNetwork(input, false)
+}
+
+func normalizeConfigForNetwork(input string, ipv6 bool) (string, error) {
 	var cfg map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(input), &cfg); err != nil {
 		return "", errors.New("配置必须是 sing-box JSON 对象")
@@ -27,6 +31,11 @@ func normalizeConfig(input string) (string, error) {
 		}
 	}
 	delete(cfg, "experimental")
+	// The portable Go runtime cannot use HarmonyOS' private CA filesystem paths.
+	// sing-box embeds the Mozilla trust store; preserve any explicit user store.
+	if _, ok := cfg["certificate"]; !ok {
+		cfg["certificate"] = json.RawMessage(`{"store":"mozilla"}`)
+	}
 	cfg["inbounds"] = json.RawMessage(`[{"type":"tun","tag":"harmony-tun","address":["172.19.0.1/30","fdfe:dcba:9876::1/126"],"mtu":1280,"auto_route":false,"stack":"gvisor"}]`)
 	var route map[string]json.RawMessage
 	if raw, ok := cfg["route"]; ok {
@@ -43,14 +52,27 @@ func normalizeConfig(input string) (string, error) {
 		if final == "" {
 			_ = json.Unmarshal(outbounds[0]["tag"], &final)
 		}
-		server := map[string]any{"type": "https", "tag": "remote-dns", "server": "1.1.1.1", "path": "/dns-query"}
-		if final != "" {
+		serverAddress := "223.5.5.5"
+		if ipv6 {
+			serverAddress = "2400:3200::1"
+		}
+		server := map[string]any{"type": "https", "tag": "remote-dns", "server": serverAddress, "path": "/dns-query", "tls": map[string]any{"enabled": true, "server_name": "dns.alidns.com"}}
+		isDirect := false
+		for _, outbound := range outbounds {
+			var tag, kind string
+			_ = json.Unmarshal(outbound["tag"], &tag)
+			_ = json.Unmarshal(outbound["type"], &kind)
+			if tag == final && kind == "direct" {
+				isDirect = true
+			}
+		}
+		if final != "" && !isDirect {
 			server["detour"] = final
 		}
 		cfg["dns"], _ = json.Marshal(map[string]any{"servers": []any{server}, "final": "remote-dns", "strategy": "prefer_ipv6"})
 	}
-	// Netlink routing is unavailable inside the application sandbox.
-	route["auto_detect_interface"] = json.RawMessage(`false`)
+	// Use the platform socket-protection callback. OS routes remain system-owned.
+	route["auto_detect_interface"] = json.RawMessage(`true`)
 	delete(route, "default_interface")
 	var rules []json.RawMessage
 	if raw, ok := route["rules"]; ok {

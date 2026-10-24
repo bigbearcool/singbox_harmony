@@ -4,7 +4,7 @@ import { Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import bridge from 'libsingboxbridge.so';
-import { BUNDLE_NAME, VPN_ABILITY, readPrivate, writePrivate, initialStatus, VpnStatus, InterfaceAddress, CoreResponse } from '../common/Store';
+import { BUNDLE_NAME, VPN_ABILITY, readPrivate, writePrivate, initialStatus, VpnStatus, InterfaceAddress, CoreResponse, CoreStats } from '../common/Store';
 
 export default class SingboxVpnAbility extends VpnExtensionAbility {
  private conn?: vpnExtension.VpnConnection;
@@ -13,6 +13,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private task: Promise<void> = Promise.resolve();
  private networkTimer: number = -1;
  private checkingNetwork: boolean = false;
+ private physicalNetId: number = 0;
 
  onCreate(_want: Want): void {
   this.destroyed = false;
@@ -27,7 +28,10 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private publish(phase: string, message: string): void {
   this.status.phase=phase;this.status.message=message;this.status.updatedAt=Date.now();
   writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));
-  hilog.info(0xD001700,'SingboxHarmony','phase=%{public}s tun=%{public}s ipv6Address=%{public}s',phase,this.status.tunName,String(this.status.ipv6AddressPresent));
+  hilog.info(0x1700,'SingboxHarmony','phase=%{public}s tun=%{public}s ipv6Address=%{public}s physical=%{public}s network=%{public}s physicalIPv6=%{public}s',phase,this.status.tunName,String(this.status.ipv6AddressPresent),this.status.physicalInterface,this.status.networkType || '',String(this.status.physicalIPv6Available || false));
+  if(phase==='running'){hilog.info(0x1700,'SingboxHarmony','traffic up=%{public}d down=%{public}d v4=%{public}d v6=%{public}d',this.status.uplink || 0,this.status.downlink || 0,this.status.ipv4Flows || 0,this.status.ipv6Flows || 0);}
+  if(phase==='running'){hilog.info(0x1700,'SingboxHarmony','socketBind ok=%{public}d fail=%{public}d error=%{public}s',this.status.bindSuccess || 0,this.status.bindFailure || 0,this.status.lastBindError || '');}
+  if(this.status.dnsError){hilog.warn(0x1700,'SingboxHarmony','dnsStatus=%{public}s',this.status.dnsError);}
  }
  private requireAlive(): void { if(this.destroyed){ throw new Error('启动已取消'); } }
  private async physicalNetwork(): Promise<string> {
@@ -38,21 +42,42 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    if(caps.bearerTypes.includes(connection.NetBearType.BEARER_VPN)) { continue; }
    if(!caps.networkCap?.includes(connection.NetCap.NET_CAPABILITY_INTERNET)) { continue; }
    const props: connection.ConnectionProperties = await connection.getConnectionProperties(handle);
-   if(props.interfaceName.length>0) { return props.interfaceName; }
+   if(props.interfaceName.length>0) {
+    this.physicalNetId=handle.netId;
+    this.status.networkType=caps.bearerTypes.includes(connection.NetBearType.BEARER_CELLULAR)?'蜂窝网络':caps.bearerTypes.includes(connection.NetBearType.BEARER_WIFI)?'Wi-Fi':'其他网络';
+    this.status.physicalIPv6Available=props.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.family===2 && !it.address.address.startsWith('fe80:'));
+    return props.interfaceName;
+   }
   }
   throw new Error('没有可用的物理网络');
  }
- private makeConfig(tunName: string): vpnExtension.VpnConfig {
-  const routes: vpnExtension.RouteInfo[] = [];
-  if(tunName.length>0) {
-   routes.push({interface:tunName,destination:{address:{address:'0.0.0.0',family:1},prefixLength:0},gateway:{address:'0.0.0.0',family:1},hasGateway:false,isDefaultRoute:true});
-   routes.push({interface:tunName,destination:{address:{address:'::',family:2},prefixLength:0},gateway:{address:'::',family:2},hasGateway:false,isDefaultRoute:true});
-  }
+ private makeConfig(): vpnExtension.VpnConfig {
   return {
    addresses:[{address:{address:'172.19.0.1',family:1},prefixLength:30},{address:{address:'fdfe:dcba:9876::1',family:2},prefixLength:126}],
-   routes:routes,dnsAddresses:['172.19.0.2','fdfe:dcba:9876::2'],mtu:1280,
+   // Empty interface requests system GetInterfaceName(). An empty gateway is
+   // essential: the route service passes this string even if hasGateway=false.
+   routes:[
+    {interface:'',destination:{address:{address:'0.0.0.0',family:1},prefixLength:0},gateway:{address:'',family:1},hasGateway:false,isDefaultRoute:true},
+    {interface:'',destination:{address:{address:'::',family:2},prefixLength:0},gateway:{address:'',family:2},hasGateway:false,isDefaultRoute:true}
+   ],dnsAddresses:['172.19.0.2','fdfe:dcba:9876::2'],mtu:1280,
    isIPv4Accepted:true,isIPv6Accepted:true,isBlocking:false
   };
+ }
+ private async confirmRoutes(): Promise<void> {
+  for(let attempt: number=0;attempt<20;attempt++){
+   for(const net of await connection.getAllNets()){
+    const caps: connection.NetCapabilities=await connection.getNetCapabilities(net);
+    if(!caps.bearerTypes.includes(connection.NetBearType.BEARER_VPN)){continue;}
+    const props: connection.ConnectionProperties=await connection.getConnectionProperties(net);
+    if(props.interfaceName!==this.status.tunName){continue;}
+    const ipv4: boolean=props.routes.some((r: connection.RouteInfo): boolean => r.destination.address.address==='0.0.0.0' && r.destination.prefixLength===0);
+    const ipv6: boolean=props.routes.some((r: connection.RouteInfo): boolean => r.destination.address.address==='::' && r.destination.prefixLength===0);
+    if(ipv4 && ipv6){return;}
+   }
+   this.requireAlive();
+   await new Promise<void>((resolve) => {setTimeout(resolve,100);});
+  }
+  throw new Error('系统尚未建立 IPv4/IPv6 两条默认路由，已中止连接');
  }
  private async startVpn(): Promise<void> {
   try {
@@ -63,14 +88,10 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    this.requireAlive();
    this.status.physicalInterface = await this.physicalNetwork();
    this.conn=vpnExtension.createVpnConnection(this.context);
-   // Discover the real name through TUNGETIFF; no guessed interface name enters a route.
-   let fd: number=await this.conn.create(this.makeConfig(''));
+   const fd: number=await this.conn.create(this.makeConfig());
    this.requireAlive();
    this.status.tunName=bridge.tunName(fd);
-   await this.conn.destroy();
-   this.requireAlive();
-   fd=await this.conn.create(this.makeConfig(this.status.tunName));
-   if(bridge.tunName(fd)!==this.status.tunName){throw new Error('系统重新分配了 TUN 名称，已中止连接');}
+   await this.confirmRoutes();
    this.requireAlive();
    // API 22+. Never start the core when loop protection fails.
    await this.conn.protectProcessNet();
@@ -78,10 +99,10 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    const addresses: InterfaceAddress[] = JSON.parse(bridge.interfaces()) as InterfaceAddress[];
    this.status.ipv6AddressPresent=addresses.some((it: InterfaceAddress): boolean => it.name===this.status.tunName && it.family===6 && it.address==='fdfe:dcba:9876::1');
    if(!this.status.ipv6AddressPresent){throw new Error('系统未给 TUN 分配预期 IPv6 地址');}
-   const result: CoreResponse=JSON.parse(await bridge.start(config,fd,this.context.filesDir,this.status.physicalInterface)) as CoreResponse;
+   const result: CoreResponse=JSON.parse(await bridge.start(config,fd,this.context.filesDir,this.status.physicalInterface,this.status.tunName,this.physicalNetId)) as CoreResponse;
    if(!result.ok){throw new Error(result.message);}
    this.requireAlive();
-   this.publish('running','内核运行中；双栈地址已确认，IPv6 全流量仍需实测验收');
+   this.publish('running','内核运行中；IPv4 / IPv6 默认路由已确认');
    this.networkTimer=setInterval(() => { this.inspectNetwork(); },3000);
   } catch(error) {
    await this.cleanup();
@@ -95,14 +116,27 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   if(this.checkingNetwork || this.destroyed){return;}
   this.checkingNetwork=true;
   try {
+   const previousNetId: number=this.physicalNetId;
    const name: string=await this.physicalNetwork();
-   if(name!==this.status.physicalInterface){
+   if(this.destroyed){return;}
+   if(name!==this.status.physicalInterface || previousNetId!==this.physicalNetId){
     await this.cleanup();
+    if(this.destroyed){return;}
     this.publish('error','网络已切换，请重新连接 VPN');
     await this.stopSelf();
-   } else { this.publish('running',this.status.message); }
+   } else {
+    const stats: CoreStats=JSON.parse(await bridge.stats()) as CoreStats;
+    if(this.destroyed){return;}
+    this.status.uplink=stats.uplink;this.status.downlink=stats.downlink;this.status.ipv4Flows=stats.ipv4Flows;this.status.ipv6Flows=stats.ipv6Flows;
+    this.status.bindSuccess=stats.bindSuccess;this.status.bindFailure=stats.bindFailure;this.status.lastBindError=stats.lastBindError;
+    this.status.dnsError=stats.dnsError;
+    this.publish('running',this.status.message);
+   }
   } catch(_error) {
-   await this.cleanup();this.publish('error','物理网络不可用，请重新连接 VPN');await this.stopSelf();
+   if(this.destroyed){return;}
+   await this.cleanup();
+   if(this.destroyed){return;}
+   this.publish('error','物理网络不可用，请重新连接 VPN');await this.stopSelf();
   } finally {this.checkingNetwork=false;}
  }
  private async stopSelf(): Promise<void> {

@@ -9,7 +9,7 @@ endif()
 add_library(singbox SHARED IMPORTED)
 set_target_properties(singbox PROPERTIES IMPORTED_LOCATION "${CORE_LIB}" IMPORTED_NO_SONAME TRUE)
 add_library(singboxbridge SHARED bridge.cpp)
-target_link_libraries(singboxbridge PUBLIC singbox libace_napi.z.so libhilog_ndk.z.so)
+target_link_libraries(singboxbridge PUBLIC singbox libace_napi.z.so libhilog_ndk.z.so libnet_connection.so)
 add_custom_command(TARGET singboxbridge POST_BUILD
  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CORE_LIB}" "$<TARGET_FILE_DIR:singboxbridge>/libsingbox.so"
  COMMENT "Package the exact linked sing-box core alongside the N-API bridge")

@@ -4,6 +4,7 @@ import { picker, fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { runNetworkProbes } from '../common/NetworkProbe';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
 
@@ -15,7 +16,10 @@ struct Index {
  @State private message: string = '导入 sing-box JSON 配置后连接';
  @State private coreVersion: string = '正在检查内核…';
  @State private busy: boolean = false;
+ @State private probing: boolean = false;
+ @State private probeResult: string = '';
  private waitingSince: number = 0;
+ private probeGeneration: number = 0;
  private observer?: vpnExtension.VpnObserver;
  private timer: number = -1;
  private context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -28,7 +32,7 @@ struct Index {
     if(!allowed){this.waitingSince=0;this.status=initialStatus();this.message='已取消系统 VPN 授权';}
    });
   } catch(_error) {}
-  bridge.version().then((value: string) => {this.coreVersion=value;hilog.info(0xD001700,'SingboxHarmony','native-core=%{public}s',value);}).catch(() => {this.coreVersion='内核加载失败';});
+  bridge.version().then((value: string) => {this.coreVersion=value;hilog.info(0x1700,'SingboxHarmony','native-core=%{public}s',value);}).catch(() => {this.coreVersion='内核加载失败';});
   this.readStatus();this.timer=setInterval(() => {this.readStatus();},1000);
  }
  aboutToDisappear(): void {
@@ -38,6 +42,9 @@ struct Index {
  private readStatus(): void {
   try {
    const latest: VpnStatus=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;
+   if((latest.phase==='running' && Date.now()-latest.updatedAt>15000) || (latest.phase==='starting' && Date.now()-latest.updatedAt>60000)){
+    latest.phase='error';latest.message='上次连接状态已过期，请重新连接';
+   }
    if(latest.updatedAt>=this.waitingSince){this.status=latest;}
   } catch(_error) {}
   if(this.waitingSince>0 && this.status.phase==='starting' && Date.now()-this.waitingSince>60000){
@@ -46,6 +53,17 @@ struct Index {
   }
  }
  private active(): boolean {return this.status.phase==='running' || this.status.phase==='starting';}
+ private async probe(): Promise<void> {
+  const generation: number=++this.probeGeneration;
+  this.probing=true;this.probeResult='正在检查连接…';
+  try {
+   const result: string=await runNetworkProbes();
+   if(generation!==this.probeGeneration){return;}
+   this.probeResult=result;
+   hilog.info(0x1700,'SingboxHarmony','probe=%{public}s',this.probeResult.replace(/\n/g,'; '));
+  } catch(_error) {if(generation===this.probeGeneration){this.probeResult='连接检查未完成';}}
+  finally {if(generation===this.probeGeneration){this.probing=false;}}
+ }
  private async saveProfile(): Promise<boolean> {
   const check: CoreResponse = JSON.parse(await bridge.check(this.profile)) as CoreResponse;
   this.message=check.message;
@@ -72,10 +90,13 @@ struct Index {
   finally {this.busy=false;}
  }
  private async toggle(): Promise<void> {
+  this.probeGeneration++;this.probeResult='';this.probing=false;
   this.busy=true;
   try {
    if(this.active()) {
     await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
+    this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
+    writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));
     this.message='已请求停止 VPN';
    } else {
     if(!await this.saveProfile()){return;}
@@ -84,7 +105,7 @@ struct Index {
     await vpnExtension.startVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
     this.message='请确认手机上的系统 VPN 授权';
    }
-  } catch(error) {this.message=(error as BusinessError).message || '操作失败';this.status=initialStatus();}
+  } catch(error) {this.message=(error as BusinessError).message || '操作失败';this.waitingSince=0;this.status=initialStatus();writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));}
   finally {this.busy=false;}
  }
  build() {
@@ -98,7 +119,15 @@ struct Index {
      Text(this.status.phase==='running'?'已连接':this.status.phase==='starting'?'连接中':'未连接').fontSize(24).fontWeight(FontWeight.Medium)
      Text(this.status.message).fontSize(14).fontColor('#657687')
      Text(`IPv4 + IPv6 · MTU 1280${this.status.tunName ? ` · ${this.status.tunName}` : ''}`).fontSize(12).fontColor('#657687')
+     if(this.status.phase==='running') {
+      Text(`${this.status.networkType || ''} · ${this.status.physicalIPv6Available?'基础网络支持 IPv6':'基础网络未报告 IPv6'}`).fontSize(12).fontColor('#657687')
+      Text(`上行 ${((this.status.uplink || 0)/1024).toFixed(1)} KB · 下行 ${((this.status.downlink || 0)/1024).toFixed(1)} KB`).fontSize(12).fontColor('#657687')
+     }
      Button(this.active()?'断开连接':'连接 VPN').width('100%').height(52).backgroundColor('#17324D').enabled(!this.busy && (this.active() || this.profile.length>0)).onClick(() => {this.toggle();})
+     if(this.status.phase==='running') {
+      Button(this.probing?'检查中…':'检查连接').width('100%').enabled(!this.probing).onClick(() => {this.probe();})
+     }
+     if(this.probeResult.length>0){Text(this.probeResult).fontSize(13).fontColor('#657687').width('100%')}
     }.padding(22).width('100%').backgroundColor(Color.White).borderRadius(24)
     Column({space:12}) {
      Text('连接配置').fontSize(20).fontWeight(FontWeight.Medium)

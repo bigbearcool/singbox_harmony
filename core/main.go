@@ -16,6 +16,7 @@ import (
 
 var lifecycle sync.Mutex
 var running *libbox.CommandServer
+var activePlatform *harmonyPlatform
 
 type response struct {
 	OK      bool   `json:"ok"`
@@ -50,7 +51,7 @@ func SBCheck(config *C.char) *C.char {
 }
 
 //export SBStart
-func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char) (res *C.char) {
+func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName *C.char, netID C.int) (res *C.char) {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
 	defer func() {
@@ -64,7 +65,7 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char) (res *C.
 	if fd < 0 {
 		return result(fmt.Errorf("无效 TUN 文件描述符"), "")
 	}
-	normalized, err := normalizeConfig(C.GoString(config))
+	normalized, err := normalizeConfigForNetwork(C.GoString(config), interfaceHasIPv6(C.GoString(iface)))
 	if err != nil {
 		return result(err, "")
 	}
@@ -72,7 +73,13 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char) (res *C.
 	if err = libbox.Setup(&libbox.SetupOptions{BasePath: path, WorkingPath: path, TempPath: path, LogMaxLines: 100, OomKillerDisabled: true}); err != nil {
 		return result(err, "")
 	}
-	platform := &harmonyPlatform{fd: int32(fd), iface: C.GoString(iface)}
+	platform := &harmonyPlatform{fd: int32(fd), iface: C.GoString(iface), tunName: C.GoString(tunName), netID: int32(netID)}
+	if platform.netID <= 0 {
+		return result(fmt.Errorf("底层网络 ID 无效"), "")
+	}
+	if platform.tunName == "" {
+		return result(fmt.Errorf("TUN 接口名为空"), "")
+	}
 	server, err := libbox.NewCommandServer(&commandHandler{}, platform)
 	if err != nil {
 		return result(err, "")
@@ -83,6 +90,7 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char) (res *C.
 		return result(err, "")
 	}
 	running = server
+	activePlatform = platform
 	return result(nil, "双栈 TUN 与 sing-box 内核已启动")
 }
 
@@ -93,8 +101,57 @@ func SBStop() *C.char {
 	if running != nil {
 		running.Close()
 		running = nil
+		activePlatform = nil
 	}
 	return result(nil, "已停止")
+}
+
+type trafficStats struct {
+	Uplink        int64  `json:"uplink"`
+	Downlink      int64  `json:"downlink"`
+	IPv4Flows     int    `json:"ipv4Flows"`
+	IPv6Flows     int    `json:"ipv6Flows"`
+	BindSuccess   int64  `json:"bindSuccess"`
+	BindFailure   int64  `json:"bindFailure"`
+	LastBindError string `json:"lastBindError"`
+	DNSError      string `json:"dnsError"`
+}
+
+//export SBStats
+func SBStats() *C.char {
+	lifecycle.Lock()
+	defer lifecycle.Unlock()
+	var stats trafficStats
+	if activePlatform != nil {
+		stats.BindSuccess = activePlatform.bindSuccess.Load()
+		stats.BindFailure = activePlatform.bindFailure.Load()
+		if value := activePlatform.lastBindError.Load(); value != nil {
+			stats.LastBindError = value.(string)
+		}
+	}
+	if running != nil {
+		stats.DNSError = dnsErrorClass(running)
+		instance := running.Instance()
+		if instance != nil && instance.TrafficManager() != nil {
+			manager := instance.TrafficManager()
+			stats.Uplink, stats.Downlink = manager.Total()
+			seen := make(map[string]bool)
+			for _, it := range append(manager.Connections(), manager.ClosedConnections()...) {
+				id := it.ID.String()
+				if seen[id] {
+					continue
+				}
+				seen[id] = true
+				if it.Metadata.Source.Addr.Is6() {
+					stats.IPv6Flows++
+				} else if it.Metadata.Source.Addr.Is4() {
+					stats.IPv4Flows++
+				}
+			}
+		}
+	}
+	data, _ := json.Marshal(stats)
+	return C.CString(string(data))
 }
 
 type commandHandler struct{}

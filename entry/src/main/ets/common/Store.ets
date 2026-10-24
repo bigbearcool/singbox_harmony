@@ -5,6 +5,7 @@ import { util } from '@kit.ArkTS';
 export const BUNDLE_NAME: string = 'com.bigbear.singbox';
 export const VPN_ABILITY: string = 'SingboxVpnAbility';
 export const DIRECT_PROFILE: string = '{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}';
+export const BLOCK_IPV6_PROFILE: string = '{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct","rules":[{"ip_cidr":["::/0"],"action":"reject"}]}}';
 
 export interface VpnStatus {
  phase: string;
@@ -13,7 +14,18 @@ export interface VpnStatus {
  physicalInterface: string;
  ipv6AddressPresent: boolean;
  updatedAt: number;
+ uplink?: number;
+ downlink?: number;
+ ipv4Flows?: number;
+ ipv6Flows?: number;
+ networkType?: string;
+ physicalIPv6Available?: boolean;
+ bindSuccess?: number;
+ bindFailure?: number;
+ lastBindError?: string;
+ dnsError?: string;
 }
+export interface CoreStats { uplink: number; downlink: number; ipv4Flows: number; ipv6Flows: number; bindSuccess: number; bindFailure: number; lastBindError: string; dnsError: string; }
 export interface InterfaceAddress { name: string; family: number; address: string; }
 export interface CoreResponse { ok: boolean; message: string; }
 

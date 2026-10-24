@@ -13,10 +13,11 @@ export CXX="$NATIVE_DIR/llvm/bin/aarch64-unknown-linux-ohos-clang++"
 export CGO_CFLAGS="-O2 -ftls-model=global-dynamic"
 mkdir -p "$ROOT_DIR/entry/src/main/cpp/prebuilt/arm64-v8a" "$ROOT_DIR/core/generated"
 cat > "$ROOT_DIR/core/generated/exports.map" <<'MAP'
-{ global: SBVersion; SBFree; SBCheck; SBStart; SBStop; local: *; };
+{ global: SBVersion; SBFree; SBCheck; SBStart; SBStop; SBStats; local: *; };
 MAP
 cd "$ROOT_DIR/core"
-"$GO_BIN" build -mod=readonly -trimpath -buildmode=c-shared \
+python3 "$ROOT_DIR/scripts/prepare-ohos-module.py" "$GO_BIN"
+"$GO_BIN" build -mod=readonly -modfile=generated/ohos.mod -trimpath -buildmode=c-shared \
  -tags 'with_gvisor,with_quic,with_utls,with_clash_api' \
  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=1.14.3 -linkmode external -extldflags '-Wl,--version-script=$ROOT_DIR/core/generated/exports.map -Wl,-z,lazy -Wl,-soname,libsingbox.so'" \
  -o "$ROOT_DIR/entry/src/main/cpp/prebuilt/arm64-v8a/libsingbox.so" .

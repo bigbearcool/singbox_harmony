@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
 )
@@ -10,19 +11,34 @@ import (
 var _ libbox.PlatformInterface = (*harmonyPlatform)(nil)
 
 type harmonyPlatform struct {
-	fd       int32
-	iface    string
-	mu       sync.Mutex
-	listener libbox.InterfaceUpdateListener
+	fd            int32
+	iface         string
+	tunName       string
+	netID         int32
+	mu            sync.Mutex
+	listener      libbox.InterfaceUpdateListener
+	bindSuccess   atomic.Int64
+	bindFailure   atomic.Int64
+	lastBindError atomic.Value
 }
 
 func (*harmonyPlatform) LocalDNSTransport() libbox.LocalDNSTransport { return nil }
 
 // API 22+ protectProcessNet is awaited by ArkTS before SBStart. A failure aborts startup.
 func (*harmonyPlatform) UsePlatformAutoDetectInterfaceControl() bool { return true }
-func (*harmonyPlatform) AutoDetectInterfaceControl(int32) error      { return nil }
-func (p *harmonyPlatform) OpenTun(libbox.TunOptions) (int32, error)  { return p.fd, nil }
-func (*harmonyPlatform) UseProcFS() bool                             { return false }
+func (p *harmonyPlatform) AutoDetectInterfaceControl(fd int32) error {
+	err := bindPhysicalSocket(fd, p.netID)
+	if err != nil {
+		p.bindFailure.Add(1)
+		p.lastBindError.Store(err.Error())
+	} else {
+		p.bindSuccess.Add(1)
+	}
+	return err
+}
+func (p *harmonyPlatform) OpenTun(libbox.TunOptions) (int32, error) { return p.fd, nil }
+func (p *harmonyPlatform) TunName() string                          { return p.tunName }
+func (*harmonyPlatform) UseProcFS() bool                            { return false }
 func (*harmonyPlatform) FindConnectionOwner(int32, string, int32, string, int32) (*libbox.ConnectionOwner, error) {
 	return nil, fmt.Errorf("MVP 不支持进程规则")
 }

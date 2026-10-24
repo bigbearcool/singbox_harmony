@@ -16,11 +16,17 @@ case "${1:-status}" in
  launch)
   "$HDC" shell aa start -b com.bigbear.singbox -a EntryAbility
   ;;
+ launch-test)
+  PRESET="${2:-direct}"
+  [[ "$PRESET" == direct || "$PRESET" == reject-ipv6 ]] || { echo 'Unknown diagnostic preset' >&2; exit 2; }
+  "$HDC" shell aa force-stop com.bigbear.singbox
+  "$HDC" shell aa start -b com.bigbear.singbox -a EntryAbility --ps diagnosticsProfile "$PRESET" --pb diagnosticsKeepAwake true
+  ;;
  stop)
   "$HDC" shell aa force-stop com.bigbear.singbox
   ;;
  logs)
-  "$HDC" shell hilog -x -t SingboxHarmony
+  "$HDC" shell hilog -x -T SingboxHarmony
   ;;
- *) echo 'usage: bash scripts/device.sh [status|install|launch|stop|logs]' >&2; exit 2;;
+ *) echo 'usage: bash scripts/device.sh [status|install|launch|launch-test [direct|reject-ipv6]|stop|logs]' >&2; exit 2;;
 esac

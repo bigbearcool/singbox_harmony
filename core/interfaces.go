@@ -32,6 +32,7 @@ import "C"
 import (
 	"fmt"
 	"github.com/sagernet/sing-box/experimental/libbox"
+	"net/netip"
 )
 
 // Use libc instead of netlink and release every getifaddrs/socket allocation.
@@ -68,4 +69,22 @@ func nativeInterfaces() ([]*libbox.NetworkInterface, error) {
 		}
 	}
 	return result, nil
+}
+
+func interfaceHasIPv6(name string) bool {
+	interfaces, err := nativeInterfaces()
+	if err != nil {
+		return false
+	}
+	for _, it := range interfaces {
+		if it.Name == name {
+			for _, value := range it.Addresses.(*stringIterator).values {
+				prefix, err := netip.ParsePrefix(value)
+				if err == nil && prefix.Addr().Is6() && !prefix.Addr().IsLinkLocalUnicast() {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
