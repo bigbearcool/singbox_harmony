@@ -6,12 +6,12 @@ import { readPrivate, writePrivate, CoreResponse, DIRECT_PROFILE, BLOCK_IPV6_PRO
 
 export interface SavedProfile {id: string; name: string; url: string; updatedAt: number; autoUpdateHours: number; revision?: string;}
 export interface ProfileLibrary {selected: string; profiles: SavedProfile[];}
-export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[]; locationAssist: boolean;}
-export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[],locationAssist:false};}
+export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[]; locationAssist: boolean; backgroundUpdates: boolean;}
+export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[],locationAssist:false,backgroundUpdates:true};}
 export function loadSettings(dir: string): AppSettings {
  try {
   const stored: AppSettings=JSON.parse(readPrivate(`${dir}/settings.json`)) as AppSettings;
-  return {autoReconnect:stored.autoReconnect!==false,autoConnect:stored.autoConnect===true,logLevel:stored.logLevel || 'warn',onDemand:stored.onDemand===true,bypassWifi:stored.bypassWifi || [],locationAssist:stored.locationAssist===true};
+  return {autoReconnect:stored.autoReconnect!==false,autoConnect:stored.autoConnect===true,logLevel:stored.logLevel || 'warn',onDemand:stored.onDemand===true,bypassWifi:stored.bypassWifi || [],locationAssist:stored.locationAssist===true,backgroundUpdates:stored.backgroundUpdates!==false};
  } catch(_error) {return defaultSettings();}
 }
 export function saveSettings(dir: string,value: AppSettings): void {writePrivate(`${dir}/settings.json`,JSON.stringify(value));}
@@ -124,6 +124,7 @@ export async function editProfile(dir: string,_library: ProfileLibrary,id: strin
  return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {const library: ProfileLibrary=currentIndex(dir);return commitContent(dir,library,recordFor(library,id),name,content);});
 }
 export function setAutoUpdate(dir: string,id: string,hours: number): ProfileLibrary {
+ if(!Number.isInteger(hours) || hours<0 || hours>168){throw new Error('更新间隔应为 0 至 168 小时的整数');}
  loadLibrary(dir);return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {
   const library: ProfileLibrary=currentIndex(dir);const record: SavedProfile=recordFor(library,id);
   if(!record.url){throw new Error('本地配置不能自动更新');}
@@ -131,23 +132,35 @@ export function setAutoUpdate(dir: string,id: string,hours: number): ProfileLibr
   writeIndex(dir,library);return library;
  });
 }
-export async function fetchProfile(url: string): Promise<string> {
+export class ProfileFetchCancellation {
+ cancelled: boolean=false;
+ private client?: http.HttpRequest;
+ cancel(): void {this.cancelled=true;try {this.client?.destroy();} catch(_error) {}}
+ attach(client: http.HttpRequest): void {if(this.cancelled){throw new Error('更新任务已取消');}this.client=client;}
+ detach(): void {this.client=undefined;}
+}
+export async function fetchProfile(url: string,cancellation?: ProfileFetchCancellation): Promise<string> {
  if(!/^https?:\/\//i.test(url)){throw new Error('请输入 HTTP 或 HTTPS 配置链接');}
  const client: http.HttpRequest=http.createHttp();
  try {
+  cancellation?.attach(client);
   const response: http.HttpResponse=await client.request(url,{method:http.RequestMethod.GET,expectDataType:http.HttpDataType.STRING,connectTimeout:15000,readTimeout:20000,maxLimit:1048576,usingCache:false});
   if(response.responseCode!==200 || typeof response.result!=='string'){throw new Error('配置服务器未返回成功文本响应');}
-  await validateProfile(response.result);return response.result;
+  if(cancellation?.cancelled){throw new Error('更新任务已取消');}
+  await validateProfile(response.result);
+  if(cancellation?.cancelled){throw new Error('更新任务已取消');}
+  return response.result;
  } catch(_error) {throw new Error('下载或校验失败，已保留原配置。请检查链接、网络及 sing-box JSON 格式');}
- finally {client.destroy();}
+ finally {cancellation?.detach();try {client.destroy();} catch(_error) {}}
 }
-export async function refreshProfile(dir: string,_library: ProfileLibrary,id: string,canCommit: () => boolean=(): boolean => true): Promise<ProfileLibrary> {
+export async function refreshProfile(dir: string,_library: ProfileLibrary,id: string,canCommit: () => boolean=(): boolean => true,cancellation?: ProfileFetchCancellation,automatic: boolean=false): Promise<ProfileLibrary> {
  const initial: SavedProfile=recordFor(loadLibrary(dir),id);
+ if(automatic && (!Number.isFinite(initial.autoUpdateHours) || initial.autoUpdateHours<=0 || Date.now()-initial.updatedAt<initial.autoUpdateHours*3600000)){throw new Error('自动更新已关闭或尚未到期');}
  if(!initial.url){throw new Error('该配置没有远程链接');}
- const content: string=await fetchProfile(initial.url);
- if(!canCommit()){throw new Error('更新任务已取消');}
+ const content: string=await fetchProfile(initial.url,cancellation);
+ if(!canCommit() || cancellation?.cancelled){throw new Error('更新任务已取消');}
  return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {
-  if(!canCommit()){throw new Error('更新任务已取消');}
+  if(!canCommit() || cancellation?.cancelled){throw new Error('更新任务已取消');}
   const current: ProfileLibrary=currentIndex(dir);const record: SavedProfile=recordFor(current,id);
   if(record.url!==initial.url || record.name!==initial.name || record.updatedAt!==initial.updatedAt || record.revision!==initial.revision || record.autoUpdateHours!==initial.autoUpdateHours){throw new Error('配置在下载期间发生变化，已保留最新版本');}
   return commitContent(dir,current,record,record.name,content);

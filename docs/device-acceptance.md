@@ -95,3 +95,14 @@ HDC shell 曾拒绝 `/proc/net/if_inet6` 和执行 `/data/local/tmp` 程序；�
 - 测试结束保留原配置与已连接的 VPN，关闭调试亮屏。二维码扫码和系统 URI 分发仍待验收。
 
 确切签名包已保存 `.deps/releases/0.3.0/entry-default-signed.hap`，SHA-256 及范围见 `build-verification.json`；0.2 历史记录见 `build-verification-v02.json`。
+
+## 0.5.6 后台任务与订阅更新（2026-10-25）
+
+- 已签名安装；普通 DATA_TRANSFER 任务及真实流量通知更新成功。定位辅助由用户亲自授予模糊位置权限后，LOCATION 任务申请成功；收尾恢复关闭定位辅助。
+- 使用官方 hidumper WorkScheduler 测试入口，独立工作进程实际收到回调。前台更新暂停，短时 USB 连接锁屏下载有效配置成功；无效下载保留旧版本。自然周期唤醒尚未验证。
+- 慢速下载中关闭后台更新：服务端观测 1.653 秒时 TCP 关闭，工作进程退出，任务取消登记。进程被终止不保证写入取消报告，不以残留 running 报告证明仍下载或已完成。
+- 测试配置已删除，原配置重新选中；原内容及运行别名与输入文件逐字节一致。后台更新总开关恢复开启，原配置没有自动远程订阅，因此无系统任务登记。
+- 正常重新打开界面，未传调试亮屏或暂停更新参数；原配置连接后，IPv4/IPv6 HTTP、IPv4 DNS 成功，IPv6 DNS 保留空 AAAA 策略。WireGuard 非零握手、加密收发及家庭 DNS 成功回包（rcode 0）再次确认。收尾保持原配置 VPN 连接。
+- 临时 HTTP 服务、USB 反向端口及公共 UI 转储已清理。9 个 ETS 测试模块、签名包校验通过；内核与 0.3 包内二进制相同。
+
+待验收：拔线静置 30 分钟、整夜 8 小时、耗电、Wi-Fi/蜂窝切换、include/exclude 应用引流。完整记录见 `build-verification-v05.json`。

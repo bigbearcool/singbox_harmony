@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-25",
+  "version": "0.5.6",
+  "baselineCommit": "6cece31c7fedfa87231008913355f6efcd62c6b0",
+  "status": "signed and installed; basic device acceptance passed; long unplugged residency pending",
+  "deviceInstalled": true,
+  "signed": true,
+  "hapPath": ".deps/releases/0.5.6/entry-default-signed.hap",
+  "hapSha256": "8842486c177443eb88de12223bd96dd50ba92d177061481d2d8fc72e5e5f7492",
+  "hapBytes": 62364644,
+  "nativeCoreIdenticalToVerifiedV03": true,
+  "checks": {
+    "actualEtsTests": "PASS: 9 actual-source ETS test modules with substitute SDK and private temporary files; no hardware emulation",
+    "hvigor": "PASS: assembleHap + SignHap",
+    "signature": "PASS: SDK hap-sign-tool verify-app, code signature and permission signature",
+    "zipCrc": "PASS",
+    "abi": "PASS: arm64 core, bridge, C++ runtime, portable linkage/TLSDESC",
+    "manifest": "PASS: both background modes and private WorkScheduler extension",
+    "device": "PASS: original config restored byte-identical; dual-stack HTTP/DNS and WireGuard encrypted home DNS reply after normal launch",
+    "backgroundTask": "PASS: DATA_TRANSFER acquisition and real-byte live-view updates (error 0); approximate LOCATION acquisition after user permission",
+    "workScheduler": "PASS: official hidumper test callback in separate work process; short USB-connected locked-screen valid update, invalid rollback; natural repeat scheduling untested",
+    "cancelDownload": "PASS: TCP EOF after 1.653 seconds of slow request, worker process gone and registration cancelled; OS process termination may leave running report without JS finally",
+    "cleanup": "PASS: own fixture profile removed, original selected, runtime alias byte-identical, location assist off, background updates on, no eligible remote schedule, normal launch without keep-awake or foreground-update-pause; USB fixture and reverse mapping removed"
+  },
+  "implemented": [
+    "DATA_TRANSFER system live view with actual counters; optional approximate LOCATION mode",
+    "Serialized background task acquisition/release and OS cancel/suspend handling",
+    "UI background polling suspension and VPN I/O throttling",
+    "Stale heartbeat checked against system VPN existence",
+    "Destruction waits for pending native startup and network ticks",
+    "Persistent WorkScheduler subscription registration and idempotent reconciliation",
+    "100-second update budget with abort, shared process lease, exponential backoff, immutable commit conflicts",
+    "Configurable subscription interval and explicit background opt-out",
+    "Default all-app VPN plus mutually exclusive app include/exclude scope"
+  ],
+  "pending": [
+    "Unplugged idle lockscreen 30 minutes and overnight 8 hours without synthetic traffic",
+    "Natural WorkScheduler repeat/wakeup timing rather than diagnostic callback",
+    "Wi-Fi/cellular changes, battery use and memory pressure",
+    "App include/exclude routing",
+    "Scan, first clipboard permission and file picker acceptance",
+    "Full SFM parity: desktop card, config SSID routing, STUN/NetworkQuality and additional endpoint/service protocols"
+  ],
+  "nativeLibrariesCompared": 3,
+  "historicalVerifiedBaseline": "0.3.0 exact artifact retained separately"
+}

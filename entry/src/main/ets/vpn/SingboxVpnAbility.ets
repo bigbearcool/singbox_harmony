@@ -6,6 +6,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import bridge from 'libsingboxbridge.so';
 import { wifiManager } from '@kit.ConnectivityKit';
 import { loadSettings } from '../common/ProfileStore';
+import { applyVpnScope, loadVpnScope } from '../common/VpnScope';
 import { ControlRequest, ControlReply, ControlResult } from '../common/Control';
 import { BUNDLE_NAME, VPN_ABILITY, readPrivate, writePrivate, initialStatus, VpnStatus, InterfaceAddress, CoreResponse, CoreStats } from '../common/Store';
 
@@ -20,6 +21,14 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private lastControlId: string = '';
  private lastSnapshotAt: number = 0;
  private bypassCurrentWifi: boolean = false;
+ private lastStatusWrite: number=0;
+ private lastNetworkInspect: number=0;
+ private lastPhaseLog: string='';
+ private lastDnsLog: string='';
+ private lastBindFailures: number=0;
+ private uiActive(): boolean {
+  try {const demand=JSON.parse(readPrivate(`${this.context.filesDir}/ui-demand.json`)) as DashboardDemand;return Date.now()-demand.updatedAt<8000 && demand.updatedAt<=Date.now()+1000;} catch(_error) {return false;}
+ }
 
  onCreate(_want: Want): void {
   this.destroyed = false;
@@ -32,14 +41,23 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   this.task = this.task.then(async () => { await this.cleanup(); if(this.status.phase!=='error'){this.publish('stopped','VPN 已停止');} });
  }
  private publish(phase: string, message: string): void {
-  this.status.phase=phase;this.status.message=message;this.status.updatedAt=Date.now();
+  const changed: boolean=this.status.phase!==phase || this.status.message!==message;
+  this.status.phase=phase;this.status.message=message;
+  if(!changed && Date.now()-this.lastStatusWrite<(this.uiActive()?1000:5000)){return;}
+  this.status.updatedAt=Date.now();this.lastStatusWrite=this.status.updatedAt;
   writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));
-  hilog.info(0x1700,'SingboxHarmony','phase=%{public}s tun=%{public}s ipv6Address=%{public}s physical=%{public}s network=%{public}s physicalIPv6=%{public}s',phase,this.status.tunName,String(this.status.ipv6AddressPresent),this.status.physicalInterface,this.status.networkType || '',String(this.status.physicalIPv6Available || false));
-  if(phase==='running'){hilog.info(0x1700,'SingboxHarmony','traffic up=%{public}d down=%{public}d v4=%{public}d v6=%{public}d',this.status.uplink || 0,this.status.downlink || 0,this.status.ipv4Flows || 0,this.status.ipv6Flows || 0);}
-  if(phase==='running'){hilog.info(0x1700,'SingboxHarmony','socketBind ok=%{public}d fail=%{public}d error=%{public}s',this.status.bindSuccess || 0,this.status.bindFailure || 0,this.status.lastBindError || '');}
-  if(this.status.dnsError){hilog.warn(0x1700,'SingboxHarmony','dnsStatus=%{public}s',this.status.dnsError);}
+  const signature: string=`${phase}|${this.status.tunName}|${this.status.physicalInterface}|${message}`;
+  if(signature!==this.lastPhaseLog){this.lastPhaseLog=signature;hilog.info(0x1700,'SingboxHarmony','phase=%{public}s tun=%{public}s ipv6Address=%{public}s physical=%{public}s network=%{public}s physicalIPv6=%{public}s',phase,this.status.tunName,String(this.status.ipv6AddressPresent),this.status.physicalInterface,this.status.networkType || '',String(this.status.physicalIPv6Available || false));}
+  if((this.status.bindFailure || 0)!==this.lastBindFailures){this.lastBindFailures=this.status.bindFailure || 0;hilog.warn(0x1700,'SingboxHarmony','socketBind fail=%{public}d',this.lastBindFailures);}
+  if((this.status.dnsError || '')!==this.lastDnsLog){this.lastDnsLog=this.status.dnsError || '';if(this.lastDnsLog){hilog.warn(0x1700,'SingboxHarmony','dnsStatus=%{public}s',this.lastDnsLog);}}
  }
  private requireAlive(): void { if(this.destroyed){ throw new Error('启动已取消'); } }
+ private tick(): void {
+  if(this.destroyed || this.checkingNetwork){return;}
+  // Track the complete in-flight tick so onDestroy waits for network probes,
+  // core startup and reconnect cleanup before releasing the final resources.
+  this.task=this.inspectNetwork();
+ }
  private async physicalNetwork(): Promise<string> {
   const preferred: connection.NetHandle = await connection.getDefaultNet();
   const candidates: connection.NetHandle[] = [preferred, ...await connection.getAllNets()];
@@ -63,7 +81,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   throw new Error('没有可用的物理网络');
  }
  private makeConfig(): vpnExtension.VpnConfig {
-  return {
+  const config: vpnExtension.VpnConfig={
    addresses:[{address:{address:'172.19.0.1',family:1},prefixLength:30},{address:{address:'fdfe:dcba:9876::1',family:2},prefixLength:126}],
    // Empty interface requests system GetInterfaceName(). An empty gateway is
    // essential: the route service passes this string even if hasGateway=false.
@@ -73,6 +91,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    ],dnsAddresses:['172.19.0.2','fdfe:dcba:9876::2'],mtu:1280,
    isIPv4Accepted:true,isIPv6Accepted:true,isBlocking:false
   };
+  return applyVpnScope(config,loadVpnScope(this.context.filesDir));
  }
  private async confirmRoutes(): Promise<void> {
   for(let attempt: number=0;attempt<20;attempt++){
@@ -104,7 +123,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    this.requireAlive();
    this.status.physicalInterface = await this.physicalNetwork();
    this.requireAlive();
-   if(this.bypassCurrentWifi){this.publish('paused','已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');this.networkTimer=setInterval(() => {this.inspectNetwork();},3000);return;}
+   if(this.bypassCurrentWifi){this.publish('paused','已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');this.networkTimer=setInterval(() => {this.tick();},3000);return;}
    this.conn=vpnExtension.createVpnConnection(this.context);
    const fd: number=await this.conn.create(this.makeConfig());
    this.requireAlive();
@@ -122,13 +141,13 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    writePrivate(`${this.context.filesDir}/running-profile.json`,config);
    this.requireAlive();
    this.publish('running','内核运行中；IPv4 / IPv6 默认路由已确认');
-   this.networkTimer=setInterval(() => { this.inspectNetwork(); },1000);
+   this.networkTimer=setInterval(() => { this.tick(); },1000);
   } catch(error) {
    await this.cleanup();
    if(this.destroyed){return;}
    if(retryable && loadSettings(this.context.filesDir).autoReconnect){
     this.publish('reconnecting',startupHint?`${startupHint}，正在重试`:'连接暂不可用，正在等待网络恢复');
-    this.networkTimer=setInterval(() => {this.inspectNetwork();},3000);
+    this.networkTimer=setInterval(() => {this.tick();},3000);
    } else {this.publish('error','VPN 启动失败，请检查配置和当前网络');await this.stopSelf();}
   }
  }
@@ -143,10 +162,11 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
     return;
    }
    if(await this.processControl()){return;}
+   if(Date.now()-this.lastNetworkInspect<(this.uiActive()?1000:5000)){return;}this.lastNetworkInspect=Date.now();
    const previousNetId: number=this.physicalNetId;
    const name: string=await this.physicalNetwork();
    if(this.destroyed){return;}
-   if(this.bypassCurrentWifi){await this.cleanup();if(this.destroyed){return;}this.publish('paused','已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');this.networkTimer=setInterval(() => {this.inspectNetwork();},3000);return;}
+   if(this.bypassCurrentWifi){await this.cleanup();if(this.destroyed){return;}this.publish('paused','已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');this.networkTimer=setInterval(() => {this.tick();},3000);return;}
    if(name!==this.status.physicalInterface || previousNetId!==this.physicalNetId){
     await this.cleanup();
     if(this.destroyed){return;}
@@ -170,7 +190,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private async recoverNetwork(message: string): Promise<void> {
   if(loadSettings(this.context.filesDir).autoReconnect){
    this.publish('reconnecting',`${message}，正在重新连接`);
-   this.networkTimer=setInterval(() => {this.inspectNetwork();},3000);
+   this.networkTimer=setInterval(() => {this.tick();},3000);
   } else {this.publish('error',`${message}，请重新连接 VPN`);await this.stopSelf();}
  }
  private async processControl(): Promise<boolean> {

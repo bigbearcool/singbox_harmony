@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { stripTypeScriptTypes } from 'node:module';
+const source=fs.readFileSync(new URL('../entry/src/main/ets/common/VpnHealth.ets',import.meta.url),'utf8').replace(/^import .*;\n/gm,'');
+const api=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes(source,{mode:'strip'})).toString('base64'));
+const now=1800000000000;const status={phase:'running',message:'running',updatedAt:now-60000,tunName:'vpn-tun',physicalInterface:'rmnet0',ipv6AddressPresent:true};
+assert.equal(api.assessExpiredVpnStatus(status,true,now).phase,'checking','a stale JS heartbeat is not evidence the native tunnel was disconnected');
+assert.equal(api.assessExpiredVpnStatus(status,false,now).phase,'error');assert.equal(api.assessExpiredVpnStatus(status,undefined,now).phase,'checking');
+assert.equal(status.phase,'running','assessment does not rewrite authoritative status');assert.equal(api.assessExpiredVpnStatus({...status,updatedAt:now-5000},false,now).phase,'running');
+assert.equal(api.assessExpiredVpnStatus({...status,phase:'paused'},false,now).phase,'checking');assert.equal(api.assessExpiredVpnStatus({...status,phase:'starting'},false,now).phase,'starting');
+assert.equal(api.assessExpiredVpnStatus({...status,phase:'stopped'},true,now).phase,'stopped');
+console.log('PASS: fresh heartbeat, stale native tunnel, absent/unknown network, paused/retrying states and snapshot preservation.');

@@ -6,10 +6,14 @@ import { util } from '@kit.ArkTS';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { RemoteProfileDraft, profileImportLink, parseProfileImportLink } from '../common/ProfileLinks';
 import { runNetworkProbes } from '../common/NetworkProbe';
-import { locationAssist } from '../common/LocationAssist';
+import { backgroundSession } from '../common/BackgroundSession';
+import { ScheduleStatus, readScheduleStatus, syncSubscriptionSchedule } from '../common/SubscriptionSchedule';
+import { UpdateReport, readUpdateReport, runDueProfileUpdates } from '../common/SubscriptionUpdates';
+import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
+import { VpnScope, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
-import { SavedProfile, ProfileLibrary, AppSettings, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
+import { SavedProfile, ProfileLibrary, AppSettings, ProfileFetchCancellation, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
 import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, WireGuardInfo, WireGuardPeer, emptyDashboard, readDashboard, sendControl } from '../common/Control';
 
 function bytesLabel(value: number): string {
@@ -45,8 +49,21 @@ struct Index {
  @State private wifiRulesText: string='';
  @State private sharedCode: string='';
  @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
- @StorageLink('locationAssistStatus') private locationAssistStatus: string='定位辅助驻留未运行';
+ @StorageLink('backgroundSessionStatus') private backgroundSessionStatus: string='后台保障未运行';
  @State private locationChanging: boolean=false;
+ @StorageLink('appForeground') @Watch('updateForeground') private appForeground: boolean=false;
+ @StorageLink('diagnosticsPauseForegroundUpdates') private diagnosticsPauseForegroundUpdates: boolean=false;
+ @State private scheduleStatus: ScheduleStatus={updatedAt:0,registered:false,intervalHours:0,message:'正在核对后台更新'};
+ @State private updateReport: UpdateReport={updatedAt:0,source:'',phase:'idle',updated:0,failed:0,skipped:0,attempts:[]};
+ private pageVisible: boolean=false;
+ private automaticUpdate?: ProfileFetchCancellation;
+ private lastDemandWrite: number=0;
+ private lastLibraryRead: number=0;
+ private healthChecking: boolean=false;
+ private lastHealthCheck: number=0;
+ @State private applicationScope: VpnScope=defaultVpnScope();
+ @State private applicationScopeText: string='';
+ @State private applicationScopeExpanded: boolean=false;
  private allowAutomaticConnect: boolean=true;
  private waitingSince: number=0;
  private probeGeneration: number=0;
@@ -59,7 +76,11 @@ struct Index {
  private context: common.UIAbilityContext=this.getUIContext().getHostContext() as common.UIAbilityContext;
 
  aboutToAppear(): void {
+  this.pageVisible=true;
+  backgroundSession.initialize(this.context);
+  this.scheduleStatus=readScheduleStatus(this.context.filesDir);
   this.settings=loadSettings(this.context.filesDir);
+  try {this.applicationScope=loadVpnScope(this.context.filesDir);this.applicationScopeText=this.applicationScope.applications.join('\n');} catch(_error) {this.message='应用范围设置无法读取，请重新保存';}
   this.wifiRulesText=this.settings.bypassWifi.join('\n');
   this.allowAutomaticConnect=true;
   this.consumePendingLink();
@@ -69,26 +90,33 @@ struct Index {
    this.observer=vpnExtension.createVpnObserver();
    this.observer.onAuthorizationResult((allowed: boolean) => {
     if(!allowed){this.waitingSince=0;this.status=initialStatus();this.message='已取消系统 VPN 授权';}
-    if(!allowed){locationAssist.stop('VPN 授权被取消，定位辅助已释放');}
+    if(!allowed){backgroundSession.stop('VPN 授权被取消，定位辅助已释放');}
    });
   } catch(_error) {}
   bridge.version().then((value: string) => {this.coreVersion=value;}).catch(() => {this.coreVersion='内核加载失败';});
   this.readStatus();
-  this.timer=setInterval(() => {this.readStatus();this.autoUpdateProfiles();},1000);
+  this.updateForeground();this.syncUpdates();
   this.reconcileInitialStatus();
  }
  aboutToDisappear(): void {
+  this.pageVisible=false;
+  backgroundSession.stop();
   if(this.timer!==-1){clearInterval(this.timer);this.timer=-1;}
   this.probeGeneration++;
   this.allowAutomaticConnect=false;
+  this.automaticUpdate?.cancel();
   try {this.observer?.offAuthorizationResult();} catch(_error) {}
  }
  private readStatus(): void {
+  if(!this.appForeground || !this.pageVisible){return;}
+  if(Date.now()-this.lastDemandWrite>=3000){try {writePrivate(`${this.context.filesDir}/ui-demand.json`,JSON.stringify({updatedAt:Date.now()}));this.lastDemandWrite=Date.now();} catch(_error) {}}
+  if(Date.now()-this.lastLibraryRead>=5000){this.lastLibraryRead=Date.now();try {this.library=loadLibrary(this.context.filesDir);} catch(_error) {}this.updateReport=readUpdateReport(this.context.filesDir);}
   try {
    const latest: VpnStatus=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;
-   const age: number=Date.now()-latest.updatedAt;
-   if(((latest.phase==='running' || latest.phase==='reconnecting' || latest.phase==='paused') && age>15000) || (latest.phase==='starting' && age>60000)){
-    latest.phase='error';latest.message='上次连接状态已过期，请重新连接';
+   if(vpnStatusExpired(latest)){
+    this.status=assessExpiredVpnStatus(latest,undefined);
+    if(!this.healthChecking && Date.now()-this.lastHealthCheck>=5000){this.verifyExpiredStatus(latest);}
+    return;
    }
    if(latest.updatedAt>=this.waitingSince){
     if(latest.updatedAt>this.lastTrafficTime){
@@ -109,7 +137,20 @@ struct Index {
    this.dashboard=readDashboard(this.context.filesDir);
   }
  }
- private active(): boolean {return this.status.phase==='running' || this.status.phase==='starting' || this.status.phase==='reconnecting' || this.status.phase==='paused';}
+ private active(): boolean {return this.status.phase==='running' || this.status.phase==='starting' || this.status.phase==='reconnecting' || this.status.phase==='paused' || this.status.phase==='checking';}
+ private async verifyExpiredStatus(snapshot: VpnStatus): Promise<void> {
+  this.healthChecking=true;this.lastHealthCheck=Date.now();
+  try {
+   let exists: boolean=false;
+   for(const net of await connection.getAllNets()){
+    const caps=await connection.getNetCapabilities(net);if(!caps.bearerTypes.includes(connection.NetBearType.BEARER_VPN)){continue;}
+    const properties=await connection.getConnectionProperties(net);
+    if(properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='172.19.0.1') && properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='fdfe:dcba:9876::1')){exists=true;break;}
+   }
+   const current=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;
+   if(current.updatedAt===snapshot.updatedAt && this.waitingSince<=snapshot.updatedAt){this.status=assessExpiredVpnStatus(current,exists);}
+  } catch(_error) {} finally {this.healthChecking=false;}
+ }
  private async reconcileInitialStatus(): Promise<void> {
   const timestamp: number=this.status.updatedAt;
   if(this.status.phase==='running'){
@@ -121,10 +162,10 @@ struct Index {
      const props: connection.ConnectionProperties=await connection.getConnectionProperties(net);
      if(props.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='172.19.0.1') && props.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='fdfe:dcba:9876::1')){exists=true;break;}
     }
-    if(!exists && this.status.phase==='running' && this.status.updatedAt===timestamp){this.status=initialStatus();writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));}
+    if(!exists && this.status.phase==='running' && this.status.updatedAt===timestamp){this.status=initialStatus();}
    } catch(_error) {}
   }
-  if(this.allowAutomaticConnect && this.settings.autoConnect && !this.busy && !this.active() && this.library.selected){await this.toggle(true);}
+  if(this.appForeground && this.pageVisible && this.allowAutomaticConnect && this.settings.autoConnect && !this.busy && !this.active() && this.library.selected){await this.toggle(true);}
   this.autoUpdateProfiles();
  }
  private selectedName(): string {return this.library.profiles.find((p: SavedProfile): boolean => p.id===this.library.selected)?.name || '尚未选择配置';}
@@ -134,7 +175,7 @@ struct Index {
   try {
    if(this.active()){
     await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
-    await locationAssist.stop();
+    await backgroundSession.stop();
     this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
     writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));this.message='已断开';
    } else {
@@ -145,18 +186,39 @@ struct Index {
     writePrivate(`${this.context.filesDir}/profile.json`,content);
     this.status={phase:'starting',message:'等待系统 VPN 授权',tunName:'',physicalInterface:'',ipv6AddressPresent:false,updatedAt:Date.now()};
     this.waitingSince=this.status.updatedAt;
-    await locationAssist.beginSession();
+    await backgroundSession.beginSession();
     await vpnExtension.startVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});this.message='正在连接';
    }
-  } catch(_error) {await locationAssist.stop();this.message='操作未完成，请检查系统 VPN 授权';this.waitingSince=0;this.status=initialStatus();writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));}
+  } catch(_error) {await backgroundSession.stop();this.message='操作未完成，请检查系统 VPN 授权';this.waitingSince=0;this.status=initialStatus();writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));}
   finally {this.busy=false;}
  }
  private async control(action: string,group: string='',outbound: string='',id: string='',mode: string=''): Promise<void> {
   if(this.controlBusy){return;}this.controlBusy=true;
+  if(action==='reconnect'){this.busy=true;}
   if(action==='wg-probe'){this.message='正在检查回家通道与家庭 DNS…';}
-  try {if(action==='reconnect'){this.library=selectProfile(this.context.filesDir,this.library,this.library.selected);writePrivate(`${this.context.filesDir}/profile.json`,readProfile(this.context.filesDir,this.library.selected));}this.message=await sendControl(this.context.filesDir,action,group,outbound,id,mode);}
+  try {
+   if(action==='reconnect'){
+    const content: string=readProfile(this.context.filesDir,this.library.selected);
+    const checked=JSON.parse(await bridge.check(content)) as CoreResponse;if(!checked.ok){throw new Error('配置校验失败');}
+    writePrivate(`${this.context.filesDir}/profile.json`,content);
+    await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});await backgroundSession.stop();
+    const deadline: number=Date.now()+8000;let present: boolean=true;
+    while(present && Date.now()<deadline){
+     present=false;
+     for(const net of await connection.getAllNets()){
+      const caps=await connection.getNetCapabilities(net);if(!caps.bearerTypes.includes(connection.NetBearType.BEARER_VPN)){continue;}
+      const properties=await connection.getConnectionProperties(net);
+      if(properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='172.19.0.1') || (this.status.tunName && properties.interfaceName===this.status.tunName)){present=true;break;}
+     }
+     if(present){await new Promise<void>((resolve) => {setTimeout(resolve,100);});}
+    }
+    if(present){throw new Error('旧系统 VPN 尚未释放');}
+    this.status={phase:'starting',message:'正在重新连接',tunName:'',physicalInterface:'',ipv6AddressPresent:false,updatedAt:Date.now()};this.waitingSince=this.status.updatedAt;
+    await backgroundSession.beginSession();await vpnExtension.startVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});this.message='正在重新连接';
+   }else {this.message=await sendControl(this.context.filesDir,action,group,outbound,id,mode);}
+  }
   catch(_error) {this.message='操作未完成，请确认 VPN 处于连接状态';}
-  finally {this.controlBusy=false;}
+  finally {this.controlBusy=false;if(action==='reconnect'){this.busy=false;}}
  }
  private async probe(): Promise<void> {
   const generation: number=++this.probeGeneration;
@@ -234,7 +296,7 @@ struct Index {
   try {
    const content: string=await fetchProfile(this.remoteURL.trim());
    this.library=await addProfile(this.context.filesDir,this.library,this.editorName || '远程配置',content,this.remoteURL.trim());
-   this.remoteURL='';this.message='远程配置已导入';
+   this.remoteURL='';this.message='远程配置已导入';this.syncUpdates();
   } catch(_error) {this.message='下载或校验失败，原配置已保留';}
   finally {this.busy=false;}
  }
@@ -243,7 +305,7 @@ struct Index {
   try {
    if(this.editingId){this.library=await editProfile(this.context.filesDir,this.library,this.editingId,this.editorName,this.editorContent);}
    else {this.library=await addProfile(this.context.filesDir,this.library,this.editorName,this.editorContent);}
-   this.editorVisible=false;this.editorContent='';this.message='配置已保存并通过内核校验';
+   this.editorVisible=false;this.editorContent='';this.message='配置已保存并通过内核校验';this.syncUpdates();
   } catch(_error) {this.message='保存未完成，请检查 JSON 和协议字段；原配置已保留';}
   finally {this.busy=false;}
  }
@@ -255,22 +317,33 @@ struct Index {
   catch(_error) {this.message='切换未完成，原配置已保留';}
  }
  private deleteProfile(record: SavedProfile): void {
-  AlertDialog.show({title:'删除配置',message:`删除“${record.name}”？`,primaryButton:{value:'取消',action:() => {}},secondaryButton:{value:'删除',action:() => {try {this.library=removeProfile(this.context.filesDir,this.library,record.id);this.message='已删除配置';} catch(_error) {this.message='请先切换到其他配置';}}}});
+  AlertDialog.show({title:'删除配置',message:`删除“${record.name}”？`,primaryButton:{value:'取消',action:() => {}},secondaryButton:{value:'删除',action:() => {try {this.library=removeProfile(this.context.filesDir,this.library,record.id);this.message='已删除配置';this.syncUpdates();} catch(_error) {this.message='请先切换到其他配置';}}}});
  }
  private async refresh(record: SavedProfile): Promise<void> {
   this.busy=true;
-  try {await refreshProfile(this.context.filesDir,this.library,record.id);this.library=loadLibrary(this.context.filesDir);this.message=this.active()?'配置已更新，重连后应用':'配置已更新';}
+  try {await refreshProfile(this.context.filesDir,this.library,record.id);this.library=loadLibrary(this.context.filesDir);this.message=this.active()?'配置已更新，手动重连后应用':'配置已更新';}
   catch(_error) {this.message='更新失败，已保留原配置';}
   finally {this.busy=false;}
  }
  private async autoUpdateProfiles(): Promise<void> {
-  if(this.busy || Date.now()-this.lastAutoUpdate<60000){return;}this.lastAutoUpdate=Date.now();
-  for(const record of this.library.profiles){
-   if(record.url && record.autoUpdateHours>0 && Date.now()-record.updatedAt>=record.autoUpdateHours*3600000){await this.refresh(record);}
-  }
+  if(this.busy || !this.appForeground || !this.pageVisible || (this.context.applicationInfo.debug && this.diagnosticsPauseForegroundUpdates) || this.automaticUpdate || Date.now()-this.lastAutoUpdate<60000){return;}this.lastAutoUpdate=Date.now();
+  const cancellation: ProfileFetchCancellation=new ProfileFetchCancellation();this.automaticUpdate=cancellation;
+  try {this.updateReport=await runDueProfileUpdates(this.context.filesDir,'foreground',cancellation,60000);this.library=loadLibrary(this.context.filesDir);} catch(_error) {}
+  finally {if(this.automaticUpdate===cancellation){this.automaticUpdate=undefined;}}
+ }
+ private updateForeground(): void {
+  if(!this.appForeground || !this.pageVisible){backgroundSession.onBackground();if(this.timer!==-1){clearInterval(this.timer);this.timer=-1;}this.automaticUpdate?.cancel();return;}
+  backgroundSession.onForeground();
+  this.readStatus();
+  if(this.timer===-1){this.timer=setInterval(() => {this.readStatus();this.autoUpdateProfiles();},1000);}
+  this.syncUpdates();
+ }
+ private async syncUpdates(): Promise<void> {this.scheduleStatus=await syncSubscriptionSchedule(this.context.filesDir);this.updateReport=readUpdateReport(this.context.filesDir);}
+ private setUpdateHours(record: SavedProfile,hours: number): void {
+  try {this.library=setAutoUpdate(this.context.filesDir,record.id,hours);this.syncUpdates();} catch(_error) {this.message='未能保存自动更新设置';}
  }
  private toggleAutoUpdate(record: SavedProfile,value: boolean): void {
-  try {this.library=setAutoUpdate(this.context.filesDir,record.id,value?24:0);} catch(_error) {this.message='未能保存自动更新设置';}
+  this.setUpdateHours(record,value?24:0);
  }
  private async exportDocument(name: string,content: string): Promise<void> {
   this.busy=true;
@@ -285,15 +358,19 @@ struct Index {
   finally {this.busy=false;}
  }
  private saveOptions(): void {saveSettings(this.context.filesDir,this.settings);this.message='设置已保存';}
+ private saveApplicationScope(): void {
+  try {this.applicationScope=saveVpnScope(this.context.filesDir,this.applicationScope.mode,this.applicationScopeText);this.applicationScopeText=this.applicationScope.applications.join('\n');this.message='应用范围已保存，下次连接时应用';}
+  catch(_error) {this.message='保存未完成，请填写 1 至 256 个有效包名，每行一个';}
+ }
  private locationOptions(value: boolean): AppSettings {
-  return {autoReconnect:this.settings.autoReconnect,autoConnect:this.settings.autoConnect,logLevel:this.settings.logLevel,onDemand:this.settings.onDemand,bypassWifi:this.settings.bypassWifi,locationAssist:value};
+  return {autoReconnect:this.settings.autoReconnect,autoConnect:this.settings.autoConnect,logLevel:this.settings.logLevel,onDemand:this.settings.onDemand,bypassWifi:this.settings.bypassWifi,locationAssist:value,backgroundUpdates:this.settings.backgroundUpdates};
  }
  private async toggleLocationAssist(value: boolean): Promise<void> {
   if(this.locationChanging){return;}this.locationChanging=true;
   try {
-   if(value && !await locationAssist.requestPermission()){this.settings=this.locationOptions(false);saveSettings(this.context.filesDir,this.settings);await locationAssist.stop('模糊定位未授权，辅助驻留未启用');return;}
+   if(value && !await backgroundSession.requestPermission()){this.settings=this.locationOptions(false);saveSettings(this.context.filesDir,this.settings);await backgroundSession.reconfigure();this.message='定位未授权，已保留普通后台运行方式';return;}
    this.settings=this.locationOptions(value);this.saveOptions();
-   if(value){await locationAssist.resumeIfRunning();}else{await locationAssist.stop();}
+   await backgroundSession.reconfigure();
   } catch(_error) {this.message='定位辅助设置未完成，请检查系统权限';}
   finally {this.locationChanging=false;}
  }
@@ -310,7 +387,7 @@ struct Index {
    this.title('熊盒 VPN')
    this.note({value:this.coreVersion})
    Column({space:14}) {
-    Text(this.status.phase==='running'?'已连接':this.status.phase==='paused'?'已暂停':this.status.phase==='reconnecting'?'等待重连':this.status.phase==='starting'?'连接中':'未连接').fontSize(28).fontWeight(FontWeight.Medium)
+    Text(this.status.phase==='running'?'已连接':this.status.phase==='checking'?'状态待确认':this.status.phase==='paused'?'已暂停':this.status.phase==='reconnecting'?'等待重连':this.status.phase==='starting'?'连接中':'未连接').fontSize(28).fontWeight(FontWeight.Medium)
     Text(this.status.message).fontSize(14).fontColor('#657687')
     Text(this.selectedName()).fontSize(16).fontWeight(FontWeight.Medium)
     if(this.status.phase==='running'){
@@ -320,7 +397,7 @@ struct Index {
      this.note({value:`累计上行 ${bytesLabel(this.status.uplink || 0)} · 下行 ${bytesLabel(this.status.downlink || 0)}`})
     }
     Button(this.active()?'断开连接':'连接 VPN').width('100%').height(52).backgroundColor('#17324D').enabled(!this.busy).onClick(() => {this.toggle();})
-    if(this.status.phase==='running'){
+    if(this.status.phase==='running' || this.status.phase==='checking'){
      Row({space:12}) {
       Button('重新连接').layoutWeight(1).enabled(!this.controlBusy && !this.busy).onClick(() => {this.control('reconnect');})
       Button(this.probing?'检查中…':'检查连接').layoutWeight(1).enabled(!this.probing).onClick(() => {this.probe();})
@@ -365,10 +442,11 @@ struct Index {
      if(record.url){
       Button('更新配置').width('100%').enabled(!this.busy).onClick(() => {this.refresh(record);})
       Button('显示导入二维码').width('100%').enabled(!this.busy).onClick(() => {this.showProfileCode(record);})
-      Row(){Text('自动更新（打开 App 时，每 24 小时）').fontSize(12).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:record.autoUpdateHours>0}).onChange((value: boolean) => {this.toggleAutoUpdate(record,value);})}.width('100%')
+       Row(){Text('自动更新').fontSize(12).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:record.autoUpdateHours>0}).onChange((value: boolean) => {if(value!==(record.autoUpdateHours>0)){this.toggleAutoUpdate(record,value);}})}.width('100%')
+       if(record.autoUpdateHours>0){Select([{value:'1 小时'},{value:'6 小时'},{value:'12 小时'},{value:'24 小时'},{value:'7 天'}]).value(record.autoUpdateHours===168?'7 天':`${record.autoUpdateHours} 小时`).onSelect((index: number) => {this.setUpdateHours(record,[1,6,12,24,168][index]);})}
      }
     }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
-   },(record: SavedProfile): string => `${record.id}-${record.name}-${record.updatedAt}-${this.library.selected}`)
+   },(record: SavedProfile): string => `${record.id}-${record.name}-${record.updatedAt}-${record.autoUpdateHours}-${this.library.selected}`)
    Column({space:12}) {
     TextInput({text:this.editorName,placeholder:'配置名称'}).onChange((value: string) => {this.editorName=value;}).enabled(!this.busy && !this.active())
     Row({space:8}) {
@@ -457,8 +535,15 @@ struct Index {
    this.title('设置与工具')
    Column({space:16}) {
     Row(){Text('定位辅助驻留（实验）').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.locationAssist}).enabled(!this.locationChanging && !this.busy).onChange((value: boolean) => {if(value!==this.settings.locationAssist){this.toggleLocationAssist(value);}})}.width('100%')
-    this.note({value:'默认关闭，仅 VPN 连接期间运行。开启会请求模糊定位并显示系统通知；位置即时丢弃，不保存、不上传。可能增加耗电，不能保证永不被系统回收。'})
-    this.note({value:this.locationAssistStatus})
+    this.note({value:'默认使用数据传输后台任务。此开关默认关闭，开启后改用低功耗模糊定位；坐标即时丢弃，不保存或上传。两种模式均显示系统通知，仅 VPN 连接期间运行，驻留效果及耗电待实测。'})
+    this.note({value:this.backgroundSessionStatus})
+    Button(this.applicationScopeExpanded?'收起应用范围':'设置哪些应用使用 VPN').width('100%').onClick(() => {this.applicationScopeExpanded=!this.applicationScopeExpanded;})
+    if(this.applicationScopeExpanded){
+     Select([{value:'所有应用'},{value:'仅指定应用'},{value:'排除指定应用'}]).value(this.applicationScope.mode==='include'?'仅指定应用':this.applicationScope.mode==='exclude'?'排除指定应用':'所有应用').onSelect((index: number) => {this.applicationScope={mode:['all','include','exclude'][index],applications:this.applicationScope.applications};})
+     if(this.applicationScope.mode!=='all'){TextArea({text:this.applicationScopeText,placeholder:'每行一个应用包名，例如 com.example.app'}).height(110).onChange((value: string) => {this.applicationScopeText=value;})}
+     Button('保存应用范围').width('100%').onClick(() => {this.saveApplicationScope();})
+     this.note({value:'默认接管所有应用。仅指定或排除模式会改变系统引流范围，下次连接生效；应用内分流继续遵循原配置。'})
+    }
     Row(){Text('网络切换或掉线后自动重连').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoReconnect}).onChange((value: boolean) => {this.settings.autoReconnect=value;this.saveOptions();})}.width('100%')
     Row(){Text('打开 App 时自动连接').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoConnect}).onChange((value: boolean) => {this.settings.autoConnect=value;this.saveOptions();})}.width('100%')
     Row(){Text('指定 Wi-Fi 暂停 VPN').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.onDemand}).onChange((value: boolean) => {this.settings.onDemand=value;this.saveOptions();})}.width('100%')
@@ -467,7 +552,10 @@ struct Index {
      Button('保存 Wi-Fi 规则').width('100%').onClick(() => {this.settings.bypassWifi=this.wifiRulesText.split(/\r?\n/).filter((name: string): boolean => name.length>0);this.saveOptions();})
      this.note({value:'服务运行时进入这些 Wi-Fi 会暂停隧道，离开后恢复；系统结束服务后，需要重新打开 App。'})
     }
-    this.note({value:'自动连接需要已获得系统 VPN 授权。自动更新会在 App 打开时检查；系统结束应用后不保证后台定时运行。'})
+    Row(){Text('系统后台订阅更新').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.backgroundUpdates}).onChange((value: boolean) => {this.settings.backgroundUpdates=value;this.saveOptions();this.syncUpdates();})}.width('100%')
+    this.note({value:this.scheduleStatus.message})
+    this.note({value:'后台由系统在有网络时择机更新，可使用蜂窝网络；更新通过校验后保存，手动重连后应用。后台检查间隔至少 2 小时，实际执行可能延后。'})
+    if(this.updateReport.updatedAt>0){this.note({value:`上次自动检查：${new Date(this.updateReport.updatedAt).toLocaleString()} · ${this.updateReport.source==='background'?'系统后台':'前台'} · ${this.updateReport.phase==='completed'?`已更新 ${this.updateReport.updated}，失败 ${this.updateReport.failed}`:this.updateReport.phase==='running'?'本轮检查已开始，完成结果待确认':this.updateReport.phase==='cancelled'?'已停止本轮更新':this.updateReport.phase==='busy'?'本轮未取得更新锁':'本轮未完成'}`})}
     Row(){Text('日志级别').layoutWeight(1);Select([{value:'warn'},{value:'info'},{value:'debug'},{value:'error'}]).value(this.settings.logLevel).onSelect((_index: number,value?: string) => {this.settings.logLevel=value || 'warn';this.saveOptions();})}.width('100%')
     this.note({value:'日志级别在下次连接时应用。'})
     Button('重置网络连接与 DNS 缓存').width('100%').enabled(this.status.phase==='running' && !this.controlBusy).onClick(() => {this.control('reset-network');})
@@ -476,7 +564,7 @@ struct Index {
      ForEach(this.dashboard.modes,(mode: string) => {Button(mode).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
     }
    }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(20)
-   this.note({value:`熊盒 VPN 0.4 · ${this.coreVersion}`})
+   this.note({value:`熊盒 VPN 0.5 · ${this.coreVersion}`})
    this.note({value:'配置和日志仅保存在本机。'})
   }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
  }

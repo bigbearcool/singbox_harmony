@@ -45,6 +45,7 @@
           }
         ],
         "backgroundModes": [
+          "dataTransfer",
           "location"
         ]
       }
@@ -54,6 +55,12 @@
         "name": "SingboxVpnAbility",
         "srcEntry": "./ets/vpn/SingboxVpnAbility.ets",
         "type": "vpn",
+        "exported": false
+      },
+      {
+        "name": "SubscriptionWorkAbility",
+        "srcEntry": "./ets/work/SubscriptionWorkAbility.ets",
+        "type": "workScheduler",
         "exported": false
       }
     ],
