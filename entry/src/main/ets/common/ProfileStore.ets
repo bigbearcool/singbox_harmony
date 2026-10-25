@@ -6,12 +6,12 @@ import { readPrivate, writePrivate, CoreResponse, DIRECT_PROFILE, BLOCK_IPV6_PRO
 
 export interface SavedProfile {id: string; name: string; url: string; updatedAt: number; autoUpdateHours: number; revision?: string;}
 export interface ProfileLibrary {selected: string; profiles: SavedProfile[];}
-export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[];}
-export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[]};}
+export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[]; locationAssist: boolean;}
+export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[],locationAssist:false};}
 export function loadSettings(dir: string): AppSettings {
  try {
   const stored: AppSettings=JSON.parse(readPrivate(`${dir}/settings.json`)) as AppSettings;
-  return {autoReconnect:stored.autoReconnect!==false,autoConnect:stored.autoConnect===true,logLevel:stored.logLevel || 'warn',onDemand:stored.onDemand===true,bypassWifi:stored.bypassWifi || []};
+  return {autoReconnect:stored.autoReconnect!==false,autoConnect:stored.autoConnect===true,logLevel:stored.logLevel || 'warn',onDemand:stored.onDemand===true,bypassWifi:stored.bypassWifi || [],locationAssist:stored.locationAssist===true};
  } catch(_error) {return defaultSettings();}
 }
 export function saveSettings(dir: string,value: AppSettings): void {writePrivate(`${dir}/settings.json`,JSON.stringify(value));}

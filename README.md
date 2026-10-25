@@ -5,6 +5,8 @@ ArkTS / ArkUI 界面，系统 VpnExtensionAbility 管理 TUN，C++ N-API 桥接�
 
 ## 当前状态
 
+源码现包含 **0.4.0 定位辅助驻留实验候选**，设置中默认关闭。已通过本机测试和 SDK 签名构建，尚未安装到手机，尚不能证明长期后台可用；手机上已验证的仍是下述 0.3。权限、隐私行为和锁屏验收范围见 [后台运行方案](docs/background-residency.md)。
+
 0.3 已签名安装到目标手机。蜂窝网络下已取得实际 WireGuard 握手、加密收发和家庭 DNS 成功应答；用户已在手机确认原先失败的家庭 IP 和域名均可打开，重启 App 后重连再次取得家庭 DNS 成功应答。0.2 基线记录单独保存在 `docs/build-verification-v02.json`。
 
 - 已构建 sing-box 1.14.3 的 arm64 鸿蒙动态库，生成调试签名 HAP，并安装到 Mate XTs。

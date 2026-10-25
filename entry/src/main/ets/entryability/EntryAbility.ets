@@ -4,10 +4,12 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { DIRECT_PROFILE, BLOCK_IPV6_PROFILE, initialStatus, readPrivate, writePrivate } from '../common/Store';
 import { setDiagnosticProfile } from '../common/ProfileStore';
 import { parseProfileImportLink } from '../common/ProfileLinks';
+import { locationAssist } from '../common/LocationAssist';
 
 export default class EntryAbility extends UIAbility {
  private diagnosticsKeepAwake: boolean = false;
  onCreate(want: Want): void {
+  locationAssist.initialize(this.context);
   this.handleLink(want);
   if(!this.context.applicationInfo.debug){return;}
   // Discard the staging path from the one-time USB import. The accepted copy
@@ -25,6 +27,9 @@ export default class EntryAbility extends UIAbility {
   writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(initialStatus()));
  }
  onNewWant(want: Want): void {this.handleLink(want);}
+ onForeground(): void {locationAssist.onForeground();}
+ onBackground(): void {locationAssist.onBackground();}
+ onDestroy(): void {locationAssist.stop();}
  private handleLink(want: Want): void {
   if(!want.uri){return;}
   try {AppStorage.setOrCreate('pendingRemoteProfile',JSON.stringify(parseProfileImportLink(want.uri)));} catch(_error) {}

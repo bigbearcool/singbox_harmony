@@ -1,1 +1,12 @@
-{"string":[{"name":"module_desc","value":"鸿蒙原生双栈 VPN"}]}
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "鸿蒙原生双栈 VPN"
+    },
+    {
+      "name": "location_assist_reason",
+      "value": "用于你主动开启的实验性定位辅助后台驻留；定位结果即时丢弃，不保存或上传。"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ import { util } from '@kit.ArkTS';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { RemoteProfileDraft, profileImportLink, parseProfileImportLink } from '../common/ProfileLinks';
 import { runNetworkProbes } from '../common/NetworkProbe';
+import { locationAssist } from '../common/LocationAssist';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
 import { SavedProfile, ProfileLibrary, AppSettings, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
@@ -44,6 +45,8 @@ struct Index {
  @State private wifiRulesText: string='';
  @State private sharedCode: string='';
  @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
+ @StorageLink('locationAssistStatus') private locationAssistStatus: string='定位辅助驻留未运行';
+ @State private locationChanging: boolean=false;
  private allowAutomaticConnect: boolean=true;
  private waitingSince: number=0;
  private probeGeneration: number=0;
@@ -66,6 +69,7 @@ struct Index {
    this.observer=vpnExtension.createVpnObserver();
    this.observer.onAuthorizationResult((allowed: boolean) => {
     if(!allowed){this.waitingSince=0;this.status=initialStatus();this.message='已取消系统 VPN 授权';}
+    if(!allowed){locationAssist.stop('VPN 授权被取消，定位辅助已释放');}
    });
   } catch(_error) {}
   bridge.version().then((value: string) => {this.coreVersion=value;}).catch(() => {this.coreVersion='内核加载失败';});
@@ -130,6 +134,7 @@ struct Index {
   try {
    if(this.active()){
     await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
+    await locationAssist.stop();
     this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
     writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));this.message='已断开';
    } else {
@@ -140,9 +145,10 @@ struct Index {
     writePrivate(`${this.context.filesDir}/profile.json`,content);
     this.status={phase:'starting',message:'等待系统 VPN 授权',tunName:'',physicalInterface:'',ipv6AddressPresent:false,updatedAt:Date.now()};
     this.waitingSince=this.status.updatedAt;
+    await locationAssist.beginSession();
     await vpnExtension.startVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});this.message='正在连接';
    }
-  } catch(_error) {this.message='操作未完成，请检查系统 VPN 授权';this.waitingSince=0;this.status=initialStatus();writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));}
+  } catch(_error) {await locationAssist.stop();this.message='操作未完成，请检查系统 VPN 授权';this.waitingSince=0;this.status=initialStatus();writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));}
   finally {this.busy=false;}
  }
  private async control(action: string,group: string='',outbound: string='',id: string='',mode: string=''): Promise<void> {
@@ -279,6 +285,18 @@ struct Index {
   finally {this.busy=false;}
  }
  private saveOptions(): void {saveSettings(this.context.filesDir,this.settings);this.message='设置已保存';}
+ private locationOptions(value: boolean): AppSettings {
+  return {autoReconnect:this.settings.autoReconnect,autoConnect:this.settings.autoConnect,logLevel:this.settings.logLevel,onDemand:this.settings.onDemand,bypassWifi:this.settings.bypassWifi,locationAssist:value};
+ }
+ private async toggleLocationAssist(value: boolean): Promise<void> {
+  if(this.locationChanging){return;}this.locationChanging=true;
+  try {
+   if(value && !await locationAssist.requestPermission()){this.settings=this.locationOptions(false);saveSettings(this.context.filesDir,this.settings);await locationAssist.stop('模糊定位未授权，辅助驻留未启用');return;}
+   this.settings=this.locationOptions(value);this.saveOptions();
+   if(value){await locationAssist.resumeIfRunning();}else{await locationAssist.stop();}
+  } catch(_error) {this.message='定位辅助设置未完成，请检查系统权限';}
+  finally {this.locationChanging=false;}
+ }
  private visibleConnections(): ConnectionInfo[] {
   const query: string=this.connectionFilter.toLowerCase();
   return this.dashboard.connections.filter((c: ConnectionInfo): boolean => `${c.domain} ${c.destination} ${c.outbound}`.toLowerCase().includes(query));
@@ -438,6 +456,9 @@ struct Index {
   Column({space:18}) {
    this.title('设置与工具')
    Column({space:16}) {
+    Row(){Text('定位辅助驻留（实验）').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.locationAssist}).enabled(!this.locationChanging && !this.busy).onChange((value: boolean) => {if(value!==this.settings.locationAssist){this.toggleLocationAssist(value);}})}.width('100%')
+    this.note({value:'默认关闭，仅 VPN 连接期间运行。开启会请求模糊定位并显示系统通知；位置即时丢弃，不保存、不上传。可能增加耗电，不能保证永不被系统回收。'})
+    this.note({value:this.locationAssistStatus})
     Row(){Text('网络切换或掉线后自动重连').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoReconnect}).onChange((value: boolean) => {this.settings.autoReconnect=value;this.saveOptions();})}.width('100%')
     Row(){Text('打开 App 时自动连接').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoConnect}).onChange((value: boolean) => {this.settings.autoConnect=value;this.saveOptions();})}.width('100%')
     Row(){Text('指定 Wi-Fi 暂停 VPN').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.onDemand}).onChange((value: boolean) => {this.settings.onDemand=value;this.saveOptions();})}.width('100%')
@@ -455,7 +476,7 @@ struct Index {
      ForEach(this.dashboard.modes,(mode: string) => {Button(mode).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
     }
    }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(20)
-   this.note({value:`熊盒 VPN 0.3 · ${this.coreVersion}`})
+   this.note({value:`熊盒 VPN 0.4 · ${this.coreVersion}`})
    this.note({value:'配置和日志仅保存在本机。'})
   }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
  }

@@ -17,6 +17,8 @@ try {
  let source=fs.readFileSync(new URL('../entry/src/main/ets/common/ProfileStore.ets',import.meta.url),'utf8').replace(/^import .*;\n/gm,'');
  source='const {fs,util,http,bridge,readPrivate,writePrivate,DIRECT_PROFILE,BLOCK_IPV6_PROFILE}=globalThis.__profileEnv;\n'+source;
  const api=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes(source,{mode:'strip'})).toString('base64'));
+ assert.equal(api.defaultSettings().locationAssist,false);
+ writePrivate(path.join(root,'settings.json'),JSON.stringify({autoReconnect:true}));assert.equal(api.loadSettings(root).locationAssist,false,'legacy settings must not silently enable location');
  writePrivate(path.join(root,'profile.json'),config('original'));
  let lib=api.loadLibrary(root);const first=lib.selected;
  assert.equal(api.readProfile(root,first),config('original'));

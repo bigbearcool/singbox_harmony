@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-25",
+  "version": "0.4.0",
+  "status": "offline signed candidate; device validation pending",
+  "baselineCommit": "960831f89461b32d00054668cbc4a236add6f5b9",
+  "signed": true,
+  "deviceInstalled": false,
+  "hapPath": ".deps/releases/0.4.0/entry-default-signed.hap",
+  "hapSha256": "efb136c72846810548a6fd22362bbe7775c03673c0c53b029825eaebb5ab6ac7",
+  "hapBytes": 62269440,
+  "nativeCoreIdenticalToVerifiedV03": true,
+  "packageChecks": "PASS: version, LOCATION background mode, approximate-only location permission; ABI/TLSDESC and portable linkage",
+  "hostTests": {
+    "locationAssist": "PASS: real ETS controller with SDK mocks, no device sensors; default off, permission rejection, coordinate object never accessed, cancellation/suspension, late startup cancellation, cleanup failures, unknown VPN state timeout",
+    "profileStore": "PASS: legacy settings keep location disabled; existing transaction regressions",
+    "profileLinks": "PASS (unchanged from verified 0.3)"
+  },
+  "pending": [
+    "First permission/notification flow and SDK acceptance on Mate XTs",
+    "Actual location subscription and task cleanup after disconnect/off/revocation",
+    "Compare foreground and VPN-extension process lifetime",
+    "Lockscreen idle 30 minutes and overnight 8 hours without USB or synthetic traffic",
+    "Wi-Fi/cellular switching and battery impact"
+  ],
+  "installedStableBaseline": "0.3.0 remains installed; no device operations in this change"
+}
