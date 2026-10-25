@@ -1,0 +1,51 @@
+package wireguard
+
+import (
+ "encoding/json"
+ "net/netip"
+ "strconv"
+ "strings"
+)
+
+type HarmonyPeerStatus struct {
+ Index int `json:"index"`
+ LastHandshake int64 `json:"lastHandshake"`
+ TxBytes int64 `json:"txBytes"`
+ RxBytes int64 `json:"rxBytes"`
+ EndpointFamily int `json:"endpointFamily"`
+}
+type HarmonyStatus struct {
+ Active bool `json:"active"`
+ Transport string `json:"transport"`
+ ListenPort int `json:"listenPort"`
+ Peers []HarmonyPeerStatus `json:"peers"`
+}
+
+// UAPI contains private/preshared keys. Return only counters and family flags;
+// raw UAPI content, addresses and key strings never leave this package.
+func ParseHarmonyWireGuardStatus(raw string) HarmonyStatus {
+ status:=HarmonyStatus{Peers:[]HarmonyPeerStatus{}}
+ for _,line:=range strings.Split(raw,"\n") {
+  key,value,ok:=strings.Cut(line,"=");if !ok {continue}
+  if key=="listen_port" {status.ListenPort,_=strconv.Atoi(value);continue}
+  if key=="public_key" {status.Peers=append(status.Peers,HarmonyPeerStatus{Index:len(status.Peers)+1});continue}
+  if len(status.Peers)==0 {continue}
+  peer:=&status.Peers[len(status.Peers)-1]
+  switch key {
+  case "last_handshake_time_sec":peer.LastHandshake,_=strconv.ParseInt(value,10,64)
+  case "tx_bytes":peer.TxBytes,_=strconv.ParseInt(value,10,64)
+  case "rx_bytes":peer.RxBytes,_=strconv.ParseInt(value,10,64)
+  case "endpoint":if endpoint,err:=netip.ParseAddrPort(value);err==nil {if endpoint.Addr().Is4(){peer.EndpointFamily=4}else{peer.EndpointFamily=6}}
+  }
+ }
+ return status
+}
+func (e *Endpoint) HarmonyWireGuardStatus() string {
+ status:=HarmonyStatus{Peers:[]HarmonyPeerStatus{},Transport:"standard-udp"}
+ if e.options.PlatformClientBind {status.Transport="protected-client-udp"}
+ if e.device!=nil {
+  raw,err:=e.device.IpcGet()
+  if err==nil {parsed:=ParseHarmonyWireGuardStatus(raw);status.Peers=parsed.Peers;status.ListenPort=parsed.ListenPort;status.Active=true}
+ }
+ encoded,_:=json.Marshal(status);return string(encoded)
+}

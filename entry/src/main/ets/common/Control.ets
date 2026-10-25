@@ -4,13 +4,16 @@ import { readPrivate, writePrivate } from './Store';
 export interface GroupItem {tag: string; type: string; urlTestTime?: number; urlTestDelay?: number;}
 export interface OutboundGroup {tag: string; type: string; selectable: boolean; selected: string; items: GroupItem[];}
 export interface ConnectionInfo {id: string; network: string; source: string; destination: string; domain: string; outbound: string; rule: string; upload: number; download: number; createdAt: number;}
-export interface DashboardData {groups: OutboundGroup[]; connections: ConnectionInfo[]; logs: string[]; modes: string[]; mode: string;}
+export interface WireGuardPeer {index: number; lastHandshake: number; txBytes: number; rxBytes: number; endpointFamily: number;}
+export interface WireGuardProbe {updatedAt: number; ok: boolean; summary: string; category: string; dnsReply: boolean; rcode: number;}
+export interface WireGuardInfo {tag: string; available: boolean; active: boolean; transport: string; peers: WireGuardPeer[]; dnsConfigured: boolean; dnsCovered: boolean; ipv4: boolean; ipv6: boolean; lastProbe?: WireGuardProbe;}
+export interface DashboardData {groups: OutboundGroup[]; connections: ConnectionInfo[]; logs: string[]; modes: string[]; mode: string; wireGuard: WireGuardInfo[];}
 export interface ControlReply {ok: boolean; message: string; data?: DashboardData;}
 export interface ControlRequest {id: string; createdAt: number; action: string; group?: string; outbound?: string; connectionId?: string; mode?: string;}
 export interface ControlResult {id: string; ok: boolean; message: string;}
-export function emptyDashboard(): DashboardData {return {groups:[],connections:[],logs:[],modes:[],mode:''};}
+export function emptyDashboard(): DashboardData {return {groups:[],connections:[],logs:[],modes:[],mode:'',wireGuard:[]};}
 export function readDashboard(dir: string): DashboardData {
- try {return JSON.parse(readPrivate(`${dir}/dashboard.json`)) as DashboardData;} catch(_error) {return emptyDashboard();}
+ try {const data: DashboardData=JSON.parse(readPrivate(`${dir}/dashboard.json`)) as DashboardData;data.wireGuard=data.wireGuard || [];return data;} catch(_error) {return emptyDashboard();}
 }
 // One outstanding request per UI; matching acknowledgements prevent replay and
 // a request's lifetime is bounded. Both files stay in the app's private sandbox.

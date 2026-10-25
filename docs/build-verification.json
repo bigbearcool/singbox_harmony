@@ -1,163 +1,99 @@
 {
   "date": "2026-10-25",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "target": "Huawei Mate XTs GRL-AL20 / HarmonyOS 7 / API 26 / arm64-v8a",
   "singBox": "1.14.3",
-  "referenceMacClient": "SFM 1.13.16 installed locally",
+  "baselineCommit": "fb4171100698294c8a9663bd366e12a5197ab148",
   "ohosGoCommit": "19667c7abfc332f848b5bd1f293e4aeb0e9991a9",
-  "baselineCommit": "cc32bf6414fb976957abed8ab3db07120cc8dfaa",
-  "buildTags": [
-    "with_gvisor",
-    "with_quic",
-    "with_utls",
-    "with_clash_api",
-    "with_wireguard"
-  ],
-  "goTests": {
-    "command": "go test -race -modfile=generated/ohos.mod -tags with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard ./...",
-    "result": "PASS",
-    "includes": [
-      "real daemon selector change and restore",
-      "invalid selector membership rejected",
-      "private selection state",
-      "SBStop releases daemon instance",
-      "log redaction",
-      "private configuration snapshot",
-      "userspace WireGuard profile policy"
-    ]
-  },
-  "hapBuild": "hvigor assembleHap debug and SignHap: PASS",
-  "hapPath": "entry/build/default/outputs/default/entry-default-signed.hap",
-  "hapSha256": "9d6acdb0333927baf5cf61c5f45a5b1e21710608f1cab0a20db2632b7060f286",
-  "hapBytes": 62156442,
+  "hapPath": ".deps/releases/0.3.0/entry-default-signed.hap",
+  "hapSha256": "a8d5d99fb9c269dd52161eab6109cb87fc9837099f70f986a12f7eb6ed096562",
+  "hapBytes": 62231337,
   "signed": true,
   "deviceInstalled": true,
   "hapContents": "arm64 core, bridge, C++ runtime, SBControl ABI, portable linkage and TLSDESC: PASS",
-  "import": {
-    "inputBytes": 539427,
-    "originalBytesPreserved": true,
-    "profileLibraryMigration": true,
-    "userConfigurationSelected": true,
-    "testProfileRemoved": true,
-    "userspaceWireGuardEnabled": true,
-    "credentialsInRepository": false
+  "hostTests": {
+    "goRace": "PASS: encrypted userspace peers over IPv4/IPv6/domain outer transport, inner IPv4/IPv6, protection denial, whitelist status and existing tests",
+    "profileLinks": "PASS: actual ETS parsing and SFM fragment name interoperability",
+    "profileStore": "PASS: actual ETS with mocked SDK filesystem; immutable revisions, stale-download conflict and rollback"
   },
-  "deviceNetwork": {
-    "type": "cellular",
-    "physicalInterface": "rmnet0",
-    "tunInterface": "vpn-tun",
-    "defaultRoutes": [
-      "0.0.0.0/0",
-      "::/0"
-    ],
-    "observedSocketBindFailures": 0
-  },
-  "finalProbes": {
-    "ipv4Http": true,
-    "ipv6Http": true,
-    "ipv4DnsA": true,
-    "ipv6DnsInterception": true,
-    "ipv6AAAAAnswers": false,
-    "emptyAAAAIsExpectedByOriginalProfile": true,
-    "display": "IPv6 DNS AAAA：已接管（配置返回空 AAAA）",
-    "dnsTargets": "both documentation-reserved and actual virtual DNS targets checked"
-  },
-  "profilesDeviceFlow": {
-    "remoteImport": true,
-    "invalidUpdateRollback": true,
-    "validUpdate": true,
-    "selection": true,
-    "deletion": true,
-    "originalPreserved": true
-  },
-  "nodeDeviceFlow": {
-    "selectedUpdatedOnScreen": true,
-    "originalRestoredOnScreen": true,
-    "groups": 2,
-    "uniqueMeasuredItems": 4
-  },
-  "nativeControlAcknowledgements": [
-    "urltest",
-    "select",
-    "restore original selection",
-    "close-all",
-    "reconnect"
-  ],
-  "configurationSnapshotMode": "0600 observed on device",
-  "reconnectCycles": [
-    {
-      "cycle": 1,
-      "connected": true,
-      "ipv6DefaultRoute": true,
-      "stopped": true,
-      "routeRemoved": true
+  "device": {
+    "networkType": "蜂窝网络",
+    "tunName": "vpn-tun",
+    "ipv6DefaultRoute": true,
+    "originalProfileBytesPreserved": true,
+    "socketBindFailures": 0,
+    "wireGuard": {
+      "available": true,
+      "active": true,
+      "transport": "protected-client-udp",
+      "peers": [
+        {
+          "index": 1,
+          "lastHandshake": 1792891507,
+          "txBytes": 380,
+          "rxBytes": 252,
+          "endpointFamily": 4
+        }
+      ],
+      "dnsConfigured": true,
+      "dnsCovered": true,
+      "ipv4": true,
+      "ipv6": false,
+      "lastProbe": {
+        "updatedAt": 1792891525043,
+        "ok": true,
+        "summary": "加密通道与家庭 DNS 回包已确认",
+        "category": "dns-reply",
+        "dnsReply": true,
+        "rcode": 0
+      }
     },
-    {
-      "cycle": 2,
-      "connected": true,
-      "ipv6DefaultRoute": true,
-      "stopped": true,
-      "routeRemoved": true
+    "networkProbes": "IPv4 网页：成功\nIPv6 网页：成功\nIPv4 DNS A：成功\nIPv6 DNS AAAA：已接管（配置返回空 AAAA）",
+    "householdBusinessAccess": {
+      "numericIP": true,
+      "domain": true,
+      "evidence": "User confirmed both originally failing destinations work on phone"
     },
-    {
-      "cycle": 3,
-      "connected": true,
-      "ipv6DefaultRoute": true,
-      "stopped": true,
-      "routeRemoved": true
+    "reconnect": {
+      "oldIPv6RouteRemoved": true,
+      "newIPv6DefaultRoute": true,
+      "homeDnsAfterReconnect": true
     },
-    {
-      "cycle": 4,
-      "connected": true,
-      "ipv6DefaultRoute": true,
-      "stopped": true,
-      "routeRemoved": true
-    },
-    {
-      "cycle": 5,
-      "connected": true,
-      "ipv6DefaultRoute": true,
-      "stopped": true,
-      "routeRemoved": true
+    "wireGuardAfterReconnect": {
+      "available": true,
+      "active": true,
+      "transport": "protected-client-udp",
+      "peers": [
+        {
+          "index": 1,
+          "lastHandshake": 1792891713,
+          "txBytes": 340,
+          "rxBytes": 220,
+          "endpointFamily": 4
+        }
+      ],
+      "dnsConfigured": true,
+      "dnsCovered": true,
+      "ipv4": true,
+      "ipv6": false,
+      "lastProbe": {
+        "updatedAt": 1792891717362,
+        "ok": true,
+        "summary": "加密通道与家庭 DNS 回包已确认",
+        "category": "dns-reply",
+        "dnsReply": true,
+        "rcode": 0
+      }
     }
-  ],
-  "finalState": {
-    "vpnConnected": false,
-    "profile": "original user-provided profile",
-    "debugKeepAwake": false,
-    "temporaryHttpServerStopped": true,
-    "usbPortForwardRemoved": true
   },
   "pending": [
-    "Controlled server proxy exit address verification",
-    "WireGuard home endpoint handshake and home DNS service",
-    "Real Wi-Fi/cellular switching and SSID pause/resume",
-    "Long lockscreen, battery, memory and fd stress",
-    "First clipboard authorization and document export picker",
-    "Other-app traffic without explicit socket binding",
-    "System Always-On, boot launch, background wakeup, widgets, per-app rules and external remote control not provided"
+    "QR scanner, import URI delivery and remote QR UI on device",
+    "Wi-Fi switching, lockscreen endurance, system background updates and widgets"
   ],
-  "baselineV01": {
-    "signedHapSha256": "173d7452985e0353017f1d32a48323ba1412e0cb206d7ba10a77517d6ef78817",
-    "positiveDirectProbes": {
-      "ipv4Http": true,
-      "ipv6Http": true,
-      "ipv4UdpDnsA": true,
-      "ipv6UdpDnsAAAA": true
-    },
-    "ipv6RejectRule": {
-      "rule": {
-        "ip_cidr": [
-          "::/0"
-        ],
-        "action": "reject"
-      },
-      "ipv4HttpPassed": true,
-      "ipv6HttpPassed": false,
-      "ipv4DnsPassed": true,
-      "ipv6DnsPassed": true,
-      "dnsHijackPrecedesRejectRule": true
-    },
-    "scope": "Previous 0.1 signed-build baseline; kept separate from the current actual-profile results."
+  "baselineV02": "build-verification-v02.json",
+  "finalState": {
+    "vpnConnected": true,
+    "originalProfileSelected": true,
+    "debugKeepAwake": false
   }
 }

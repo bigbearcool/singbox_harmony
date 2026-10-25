@@ -90,3 +90,45 @@ patch(target / 'common/dialer/default.go', '\treturn &DefaultDialer{\n', '''\t//
 \tdefaultNetworkStrategy = false
 \treturn &DefaultDialer{
 ''')
+
+# WireGuard's optimized StdNetBind is a separate OS-specific socket path. The
+# public VPN sandbox uses the same protected client dialer for encrypted UDP as
+# other outbounds. Keep the standard listener for non-platform/test servers.
+patch(target / 'transport/wireguard/endpoint_options.go', '\tWorkers           int\n', '\tWorkers           int\n\tPlatformClientBind bool\n')
+patch(target / 'transport/wireguard/endpoint.go', '\tif isUDPListener {\n', '\tif e.options.PlatformClientBind { isUDPListener = false }\n\tif isUDPListener {\n')
+patch(target / 'protocol/wireguard/endpoint.go', '\tnetworkManager := service.FromContext[adapter.NetworkManager](ctx)\n', '\tnetworkManager := service.FromContext[adapter.NetworkManager](ctx)\n\tplatform := service.FromContext[adapter.PlatformInterface](ctx)\n')
+patch(target / 'protocol/wireguard/endpoint.go', '\t\tWorkers: options.Workers,\n', '\t\tWorkers: options.Workers,\n\t\tPlatformClientBind: platform != nil && platform.UsePlatformAutoDetectInterfaceControl(),\n')
+patch(target / 'transport/wireguard/endpoint.go', '\t\treturn E.Cause(err, "setup wireguard: \\n", ipcConf.String())\n', '\t\treturn E.Cause(err, "setup WireGuard device")\n')
+# EventUp is asynchronous; startup must wait for the bind result instead of
+# reporting a running endpoint when the OS rejected its UDP socket.
+patch(target / 'transport/wireguard/endpoint.go', '\te.device = wgDevice\n', '''\tif err = wgDevice.Up(); err != nil {
+\t\twgDevice.Close()
+\t\treturn E.Cause(err, "start protected WireGuard UDP")
+\t}
+\te.device = wgDevice
+''')
+# The client bind's optimistic conn read races with its receive/send worker.
+# Serialize lookup and publication under the existing connection mutex.
+patch(target / 'transport/wireguard/client_bind.go', '''\tserverConn := c.conn
+\tif serverConn != nil {
+\t\tselect {
+\t\tcase <-serverConn.done:
+\t\t\tserverConn = nil
+\t\tdefault:
+\t\t\treturn serverConn, nil
+\t\t}
+\t}
+\tc.connAccess.Lock()
+''', '\tc.connAccess.Lock()\n')
+patch(target / 'transport/wireguard/client_bind.go', '\tserverConn = c.conn\n', '\tserverConn := c.conn\n')
+patch(target / 'transport/wireguard/client_bind.go', '\tc.bindCtx, c.bindDone = context.WithCancel(c.ctx)\n', '''\tc.bindCtx, c.bindDone = context.WithCancel(c.ctx)
+\tif _, err = c.connect(); err != nil {
+\t\tc.bindDone()
+\t\treturn nil, 0, err
+\t}
+''')
+for relative, fixture in [('transport/wireguard/harmony_status.go', 'wireguard_status.go.txt'), ('protocol/wireguard/harmony_status.go', 'wireguard_protocol_status.go.txt')]:
+    destination = target / relative
+    shutil.copyfile(root / 'core/patches' / fixture, destination)
+    destination.chmod(0o644)
+print('Prepared protected WireGuard client UDP and whitelisted peer status.')

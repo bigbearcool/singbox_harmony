@@ -3,11 +3,13 @@ import { vpnExtension, connection } from '@kit.NetworkKit';
 import { picker, fileIo as fs } from '@kit.CoreFileKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { util } from '@kit.ArkTS';
+import { scanBarcode, scanCore } from '@kit.ScanKit';
+import { RemoteProfileDraft, profileImportLink, parseProfileImportLink } from '../common/ProfileLinks';
 import { runNetworkProbes } from '../common/NetworkProbe';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
-import { SavedProfile, ProfileLibrary, AppSettings, defaultSettings, loadSettings, saveSettings, loadLibrary, saveLibrary, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
-import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, emptyDashboard, readDashboard, sendControl } from '../common/Control';
+import { SavedProfile, ProfileLibrary, AppSettings, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
+import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, WireGuardInfo, WireGuardPeer, emptyDashboard, readDashboard, sendControl } from '../common/Control';
 
 function bytesLabel(value: number): string {
  if(value>=1073741824){return `${(value/1073741824).toFixed(2)} GB`;}
@@ -40,6 +42,8 @@ struct Index {
  @State private uploadRate: number=0;
  @State private downloadRate: number=0;
  @State private wifiRulesText: string='';
+ @State private sharedCode: string='';
+ @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
  private allowAutomaticConnect: boolean=true;
  private waitingSince: number=0;
  private probeGeneration: number=0;
@@ -55,7 +59,8 @@ struct Index {
   this.settings=loadSettings(this.context.filesDir);
   this.wifiRulesText=this.settings.bypassWifi.join('\n');
   this.allowAutomaticConnect=true;
-  this.library=loadLibrary(this.context.filesDir);
+  this.consumePendingLink();
+  try {this.library=loadLibrary(this.context.filesDir);} catch(_error) {this.message='配置索引读取失败，原文件已保留';}
   this.dashboard=readDashboard(this.context.filesDir);
   try {
    this.observer=vpnExtension.createVpnObserver();
@@ -95,7 +100,7 @@ struct Index {
   if(this.waitingSince>0 && this.status.phase==='starting' && Date.now()-this.waitingSince>60000){
    this.status=initialStatus();this.status.message='等待授权超时，可重新连接';this.waitingSince=0;
   }
-  if(this.status.phase==='running' && this.activeTab>=2 && this.activeTab<=5){
+  if(this.status.phase==='running' && this.activeTab!==1){
    writePrivate(`${this.context.filesDir}/dashboard-demand.json`,JSON.stringify({updatedAt:Date.now()}));
    this.dashboard=readDashboard(this.context.filesDir);
   }
@@ -142,7 +147,8 @@ struct Index {
  }
  private async control(action: string,group: string='',outbound: string='',id: string='',mode: string=''): Promise<void> {
   if(this.controlBusy){return;}this.controlBusy=true;
-  try {this.message=await sendControl(this.context.filesDir,action,group,outbound,id,mode);}
+  if(action==='wg-probe'){this.message='正在检查回家通道与家庭 DNS…';}
+  try {if(action==='reconnect'){this.library=selectProfile(this.context.filesDir,this.library,this.library.selected);writePrivate(`${this.context.filesDir}/profile.json`,readProfile(this.context.filesDir,this.library.selected));}this.message=await sendControl(this.context.filesDir,action,group,outbound,id,mode);}
   catch(_error) {this.message='操作未完成，请确认 VPN 处于连接状态';}
   finally {this.controlBusy=false;}
  }
@@ -152,7 +158,7 @@ struct Index {
   let timeout: number=-1;
   this.probing=true;this.probeResult='正在检查连接…';
   try {
-   const content: string=readProfile(this.context.filesDir,profileId);
+   let content: string='';try {content=readPrivate(`${this.context.filesDir}/running-profile.json`);} catch(_error) {content=readProfile(this.context.filesDir,profileId);}
    const result: string=await Promise.race([runNetworkProbes(content),new Promise<string>((resolve) => {timeout=setTimeout(() => {resolve('连接检查超时，请检查当前配置的 DNS 与出站');},8000);})]);
    writePrivate(`${this.context.filesDir}/network-probe.json`,JSON.stringify({updatedAt:Date.now(),profileId:profileId,result:result,cancelled:generation!==this.probeGeneration}));
    if(generation===this.probeGeneration){this.probeResult=result;}
@@ -182,8 +188,40 @@ struct Index {
  private async pasteProfile(): Promise<void> {
   try {
    const data: pasteboard.PasteData=await pasteboard.getSystemPasteboard().getData();
-   this.editorContent=data.getPrimaryText();this.editorName='剪贴板配置';this.editingId='';this.editorVisible=true;
+   this.acceptImportText(data.getPrimaryText());
   } catch(_error) {this.message='未能读取剪贴板，请允许访问或手动粘贴';}
+ }
+ private consumePendingLink(): void {
+  if(!this.pendingRemoteProfile){return;}
+  try {
+   const draft: RemoteProfileDraft=JSON.parse(this.pendingRemoteProfile) as RemoteProfileDraft;
+   this.acceptImportText(profileImportLink(draft.name,draft.url));
+  } catch(_error) {this.message='导入链接无效';}
+  this.pendingRemoteProfile='';
+ }
+ private acceptImportText(text: string): void {
+  this.allowAutomaticConnect=false;this.activeTab=1;
+  if(text.trim().startsWith('{')){
+   if(new util.TextEncoder().encodeInto(text).length>1048576){throw new Error('配置过大');}
+   this.editingId='';this.editorContent=text;this.editorName='导入配置';this.editorVisible=true;
+  } else {
+   const draft: RemoteProfileDraft=parseProfileImportLink(text);
+   this.remoteURL=draft.url;this.editorName=draft.name;this.editorVisible=false;
+  }
+  this.message=this.active()?'已填入导入草稿，请断开 VPN 后确认导入':'已填入导入草稿，请校验保存或下载后导入';
+ }
+ private async scanProfile(): Promise<void> {
+  this.busy=true;
+  try {const result: scanBarcode.ScanResult=await scanBarcode.startScanForResult(this.context,{scanTypes:[scanCore.ScanType.QR_CODE],enableMultiMode:false,enableAlbum:true});this.acceptImportText(result.originalValue);}
+  catch(_error) {this.message='未完成扫码，现有配置未改变';}
+  finally {this.busy=false;}
+ }
+ private showProfileCode(record: SavedProfile): void {
+  try {
+   const code: string=profileImportLink(record.name,record.url);
+   if(new util.TextEncoder().encodeInto(code).length>1800){this.message='链接较长，请使用文件导出';return;}
+   this.sharedCode=code;
+  } catch(_error) {this.message='只有远程配置可以生成导入链接二维码';}
  }
  private async importRemote(): Promise<void> {
   this.busy=true;
@@ -226,7 +264,7 @@ struct Index {
   }
  }
  private toggleAutoUpdate(record: SavedProfile,value: boolean): void {
-  record.autoUpdateHours=value?24:0;saveLibrary(this.context.filesDir,this.library);
+  try {this.library=setAutoUpdate(this.context.filesDir,record.id,value?24:0);} catch(_error) {this.message='未能保存自动更新设置';}
  }
  private async exportDocument(name: string,content: string): Promise<void> {
   this.busy=true;
@@ -272,6 +310,24 @@ struct Index {
     }
     if(this.probeResult){this.note({value:this.probeResult})}
    }.padding(22).width('100%').backgroundColor(Color.White).borderRadius(22)
+   if(this.status.phase==='running'){
+    ForEach(this.dashboard.wireGuard,(wg: WireGuardInfo) => {
+     Column({space:12}) {
+      Text(`回家通道 · ${wg.tag}`).fontSize(20).fontWeight(FontWeight.Medium).width('100%')
+      this.note({value:wg.active?'WireGuard 内核已启动':'WireGuard 尚未启动'})
+      this.note({value:`家庭目标地址族：${wg.ipv4?'IPv4 ':''}${wg.ipv6?'IPv6':''}`})
+      ForEach(wg.peers,(peer: WireGuardPeer) => {
+       Text(peer.lastHandshake>0?`Peer ${peer.index} · 最近握手 ${new Date(peer.lastHandshake*1000).toLocaleString()}`:`Peer ${peer.index} · 尚无握手记录`).fontSize(13).width('100%')
+       Text(`加密发送 ${bytesLabel(peer.txBytes)} · 接收 ${bytesLabel(peer.rxBytes)}`).fontSize(13).fontColor('#657687').width('100%')
+      },(peer: WireGuardPeer): string => `${peer.index}-${peer.lastHandshake}-${peer.txBytes}-${peer.rxBytes}`)
+      if(this.status.bindFailure){this.note({value:`底层网络绑定失败次数：${this.status.bindFailure}`})}
+      if(wg.dnsConfigured && !wg.dnsCovered){this.note({value:'家庭 DNS 不在 peer 的 AllowedIPs 中，请检查配置。'})}
+      Button(this.controlBusy?'检查中…':'检查家庭 DNS').width('100%').enabled(!this.controlBusy && wg.active && wg.dnsConfigured && wg.dnsCovered).onClick(() => {this.control('wg-probe','',wg.tag);})
+      if(!wg.dnsConfigured){this.note({value:'该通道未配置可供检查的 UDP DNS，可先查看握手和加密收发计数。'})}
+      if(wg.lastProbe){this.note({value:`上次检查：${wg.lastProbe.summary}\n${new Date(wg.lastProbe.updatedAt).toLocaleString()}`})}
+     }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(22)
+    },(wg: WireGuardInfo): string => `${wg.tag}-${wg.peers.map((peer: WireGuardPeer): string => `${peer.lastHandshake}:${peer.txBytes}:${peer.rxBytes}`).join('|')}-${wg.lastProbe?.updatedAt || 0}`)
+   }
    this.note({value:'连接使用所选配置的分流规则；网络切换时按设置自动重连。'})
   }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
  }
@@ -290,6 +346,7 @@ struct Index {
      }.width('100%')
      if(record.url){
       Button('更新配置').width('100%').enabled(!this.busy).onClick(() => {this.refresh(record);})
+      Button('显示导入二维码').width('100%').enabled(!this.busy).onClick(() => {this.showProfileCode(record);})
       Row(){Text('自动更新（打开 App 时，每 24 小时）').fontSize(12).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:record.autoUpdateHours>0}).onChange((value: boolean) => {this.toggleAutoUpdate(record,value);})}.width('100%')
      }
     }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
@@ -300,6 +357,12 @@ struct Index {
      Button('本地文件').layoutWeight(1).enabled(!this.busy && !this.active()).onClick(() => {this.importFile();})
      Button('剪贴板').layoutWeight(1).enabled(!this.busy && !this.active()).onClick(() => {this.pasteProfile();})
     }.width('100%')
+    Button('扫码导入').width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.scanProfile();})
+    if(this.sharedCode){
+     QRCode(this.sharedCode).width(220).height(220).color('#17324D').backgroundColor(Color.White)
+     this.note({value:'二维码包含配置访问链接，请只展示给可信设备。'})
+     Button('关闭二维码').width('100%').onClick(() => {this.sharedCode='';})
+    }
     TextInput({text:this.remoteURL,placeholder:'远程 sing-box JSON 链接'}).type(InputType.Password).onChange((value: string) => {this.remoteURL=value;}).enabled(!this.busy && !this.active())
     Button('下载并导入').width('100%').enabled(!this.busy && !this.active() && this.remoteURL.length>0).onClick(() => {this.importRemote();})
     Button('新建 JSON 配置').width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorContent='';this.editorVisible=true;})
@@ -392,7 +455,7 @@ struct Index {
      ForEach(this.dashboard.modes,(mode: string) => {Button(mode).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
     }
    }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(20)
-   this.note({value:`熊盒 VPN 0.2 · ${this.coreVersion}`})
+   this.note({value:`熊盒 VPN 0.3 · ${this.coreVersion}`})
    this.note({value:'配置和日志仅保存在本机。'})
   }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
  }

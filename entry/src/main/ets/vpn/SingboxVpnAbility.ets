@@ -92,6 +92,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  }
  private async startVpn(): Promise<void> {
   let retryable: boolean=false;
+  let startupHint: string='';
   if(this.networkTimer!==-1){clearInterval(this.networkTimer);this.networkTimer=-1;}
   try {
    this.status.uplink=0;this.status.downlink=0;this.status.bindSuccess=0;this.status.bindFailure=0;this.status.dnsError='';
@@ -117,7 +118,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    this.status.ipv6AddressPresent=addresses.some((it: InterfaceAddress): boolean => it.name===this.status.tunName && it.family===6 && it.address==='fdfe:dcba:9876::1');
    if(!this.status.ipv6AddressPresent){throw new Error('系统未给 TUN 分配预期 IPv6 地址');}
    const result: CoreResponse=JSON.parse(await bridge.start(config,fd,this.context.filesDir,this.status.physicalInterface,this.status.tunName,this.physicalNetId)) as CoreResponse;
-   if(!result.ok){throw new Error(result.message);}
+   if(!result.ok){if(result.errorCode?.startsWith('wg-')){startupHint=result.message;}throw new Error('内核启动未完成');}
+   writePrivate(`${this.context.filesDir}/running-profile.json`,config);
    this.requireAlive();
    this.publish('running','内核运行中；IPv4 / IPv6 默认路由已确认');
    this.networkTimer=setInterval(() => { this.inspectNetwork(); },1000);
@@ -125,7 +127,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    await this.cleanup();
    if(this.destroyed){return;}
    if(retryable && loadSettings(this.context.filesDir).autoReconnect){
-    this.publish('reconnecting','连接暂不可用，正在等待网络恢复');
+    this.publish('reconnecting',startupHint?`${startupHint}，正在重试`:'连接暂不可用，正在等待网络恢复');
     this.networkTimer=setInterval(() => {this.inspectNetwork();},3000);
    } else {this.publish('error','VPN 启动失败，请检查配置和当前网络');await this.stopSelf();}
   }

@@ -27,7 +27,7 @@ export interface VpnStatus {
 }
 export interface CoreStats { uplink: number; downlink: number; ipv4Flows: number; ipv6Flows: number; bindSuccess: number; bindFailure: number; lastBindError: string; dnsError: string; }
 export interface InterfaceAddress { name: string; family: number; address: string; }
-export interface CoreResponse { ok: boolean; message: string; }
+export interface CoreResponse { ok: boolean; message: string; errorCode?: string; }
 
 export function readPrivate(path: string): string {
  return fs.readTextSync(path);

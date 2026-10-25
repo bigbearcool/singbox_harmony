@@ -50,6 +50,7 @@ type dashboardSnapshot struct {
 	Logs        []string         `json:"logs"`
 	Modes       []string         `json:"modes"`
 	Mode        string           `json:"mode"`
+	WireGuard   []wireGuardView  `json:"wireGuard"`
 }
 type controlReply struct {
 	OK      bool               `json:"ok"`
@@ -120,12 +121,17 @@ func coreControl(input string) string {
 	if err := json.Unmarshal([]byte(input), &request); err != nil || running == nil {
 		reply.Message = "VPN 未运行或请求无效"
 	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		timeout := 2 * time.Second
+		if request.Action == "wg-probe" {
+			timeout = 4 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		var err error
 		switch request.Action {
 		case "snapshot":
 			data := &dashboardSnapshot{Groups: []*daemon.Group{}, Connections: []connectionView{}, Logs: []string{}, Modes: []string{}}
+			data.WireGuard = wireGuardViews()
 			groups := &groupSnapshot{ctx: ctx}
 			_ = running.SubscribeGroups(&emptypb.Empty{}, groups)
 			if groups.groups != nil {
@@ -167,6 +173,9 @@ func coreControl(input string) string {
 			}
 		case "urltest":
 			_, err = running.URLTest(ctx, &daemon.URLTestRequest{OutboundTag: request.Outbound})
+		case "wg-probe":
+			probe := probeWireGuard(ctx, request.Outbound)
+			reply.Message = probe.Summary
 		case "close":
 			_, err = running.CloseConnection(ctx, &daemon.CloseConnectionRequest{Id: request.ID})
 		case "close-all":

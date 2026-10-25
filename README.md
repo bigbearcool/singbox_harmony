@@ -1,19 +1,23 @@
 # 熊盒 VPN · HarmonyOS 自用版
 
-面向华为 Mate XTs（GRL-AL20）、HarmonyOS 7 / API 26 的原生 VPN 客户端（0.2 自用签名版）。
+面向华为 Mate XTs（GRL-AL20）、HarmonyOS 7 / API 26 的原生 VPN 客户端（0.3 自用签名版）。
 ArkTS / ArkUI 界面，系统 VpnExtensionAbility 管理 TUN，C++ N-API 桥接源码构建的 sing-box。
 
 ## 当前状态
+
+0.3 已签名安装到目标手机。蜂窝网络下已取得实际 WireGuard 握手、加密收发和家庭 DNS 成功应答；用户已在手机确认原先失败的家庭 IP 和域名均可打开，重启 App 后重连再次取得家庭 DNS 成功应答。0.2 基线记录单独保存在 `docs/build-verification-v02.json`。
 
 - 已构建 sing-box 1.14.3 的 arm64 鸿蒙动态库，生成调试签名 HAP，并安装到 Mate XTs。
 - 真机蜂窝网络 `rmnet0` 上，内核加载、双栈 TUN、`0.0.0.0/0` 与 `::/0` 默认路由均已确认。
 - 直连诊断基线中，绑定实际 VPN 网络的 IPv4/IPv6 HTTP 和 DNS A/AAAA 自检通过；加入 `::/0` 拒绝规则后 IPv6 HTTP 失败、IPv4 HTTP 仍成功。
 - 连续 5 次连接/断开通过，每轮确认 IPv6 默认路由建立与移除。本机 Go race 测试、HAP 包内 arm64/TLSDESC/动态依赖检查通过。
-- 已完整导入实际用户配置，保留 VLESS、WireGuard、selector、urltest 和内联规则集；真机已取得节点延迟结果。其他应用流量、WireGuard 家庭端握手、长时间锁屏及真实 Wi-Fi 切换仍需补充验收。
+- 已完整导入实际用户配置，保留 VLESS、WireGuard、selector、urltest 和内联规则集；真机已取得节点延迟结果。其他应用的家庭业务访问、长时间锁屏及真实 Wi-Fi 切换仍需补充验收。
 
 ## 日常使用功能
 
 - 六个原生页面：总览、配置、节点、连接、日志、设置。多配置的本地文件、剪贴板、JSON 编辑、远程 URL 导入，校验、切换、更新、重命名、删除和导出。
+- 支持 SFM 的 `sing-box://import-remote-profile?url=…#名称` 链接、原生扫码导入和远程配置链接二维码。链接先填入草稿，确认后才下载；扫码与 URI 系统分发尚待真机验收。
+- 配置采用私有锁、不可变版本文件和原子索引；下载期间发生编辑、删除或更新冲突时保留最新版本，不用旧下载覆盖。
 - 远程更新通过校验才替换旧配置；自动更新在 App 打开时每分钟检查，按每份配置的 24 小时间隔执行。系统结束 App 后不承诺定时后台执行。
 - 正在运行的内核提供 selector 手动切换、整组/单节点延迟测试、urltest 当前选择和测速结果。手动选择按配置内容隔离，0600 原子保存，重连恢复。
 - 活动连接的域名、地址、出站、匹配规则、流量、搜索、逐条/全部关闭；最多显示最新 200 条。最近 100 条内核日志支持搜索、清空、导出，URL 与常见凭据字段脱敏。
@@ -27,6 +31,7 @@ ArkTS / ArkUI 界面，系统 VpnExtensionAbility 管理 TUN，C++ N-API 桥接�
 - 未指定证书设置时使用 sing-box 内嵌 Mozilla 根证书库，保留 TLS 验证；指定证书设置时保留原值。
 - 私有沙箱保存配置与控制请求，文件权限 0600；签名配置、证书和构建产物不进入 Git。
 - 可设置打开 App 时自动连接、网络丢失/切换后自动重试，以及指定 Wi-Fi SSID 暂停隧道、离开后恢复。SSID 规则只在 VPN 服务仍运行时生效；系统杀进程后不会自行唤醒。默认不启用 SSID 暂停。
+- WireGuard 外层 UDP 走相同的物理网络保护绑定；启动同步检查 UDP 创建结果，提供握手时间、加密收发和家庭 DNS 检查，不从“已启动”推断家庭网络可用。
 - 仅允许用户态 WireGuard endpoint（`system:false`，不指定监听端口），仍拒绝系统 TUN endpoint、其他 endpoint 类型和 services。
 - 系统 Always-On、系统级断网保护、开机自启、桌面卡片和逐应用规则尚未实现；不能把普通自签应用等同于系统 VPN 管理权限。
 
@@ -78,6 +83,7 @@ python3 tests/verify_hap.py entry/build/default/outputs/default/entry-default-si
 cd core
 go test -race -modfile=generated/ohos.mod -tags with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard ./...
 cd ..
+node --test tests/profile_links.test.mjs tests/profile_store.test.mjs
 python3 tests/verify_hap.py entry/build/default/outputs/default/entry-default-signed.hap
 bash scripts/device.sh logs
 ```

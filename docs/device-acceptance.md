@@ -81,3 +81,17 @@ HDC shell 曾拒绝 `/proc/net/if_inet6` 和执行 `/data/local/tmp` 程序；�
 实际配置的首条 DNS 规则是对 AAAA 查询返回 `NOERROR` 空答案。客户端保留该策略，自检会分别确认 IPv6 HTTP 通网与 IPv6 UDP DNS 截获，并将后一项标为“已接管（配置返回空 AAAA）”；这不表示该配置会返回 IPv6 域名地址。没有擅自删除这条规则。
 
 最终 0.2 签名包复测：IPv4/IPv6 HTTP 成功，IPv4 DNS A 成功，IPv6 UDP DNS 收到与原配置一致的空 AAAA 应答；节点选择与恢复已在界面上实际刷新。再次完成 5 轮路由建立/移除，结束时保留用户配置、VPN 已断开，调试亮屏、临时 HTTP 服务与 USB 端口转发均已关闭。
+
+## 0.3 WireGuard 修复候选（2026-10-25）
+
+用户反馈 0.2 家庭内网 IP 和域名均打不开。0.3 将 WireGuard 外层 UDP 改为受保护的客户端 socket 路径，同步检查 bind/Up 返回值，并显示白名单握手/计数信息。没有修改家庭服务端、peer、密钥或原始配置。
+
+- 已签名安装 0.3.0，原始配置仍逐字节一致。蜂窝网络双栈 TUN 与 IPv6 默认路由确认，所观测 socket 绑定失败为 0。
+- 实际 endpoint 使用 `protected-client-udp`，取得非零握手时间和加密 tx/rx。直接经该 endpoint 向原配置指定的家庭 DNS 发出有界查询，收到事务匹配的成功 DNS 应答（rcode 0）。此项证实加密通道至家庭 DNS 的往返；不代替其他 App 的业务服务验证。
+- 绑定 VPN 网络的 IPv4/IPv6 HTTP 与 IPv4 DNS A 自检通过，IPv6 DNS 保留原配置的空 AAAA 策略。
+- HDC shell 对家庭 resolver 数字 IP 的 ICMP 检查未收到响应；该 UID 路径及家庭 ICMP 策略未确定，不能据此断定业务路径失败或成功。
+- 本机真实加密用户态 peer 测试覆盖外层 IPv4/IPv6/域名、内层 IPv4/IPv6和保护回调权限拒绝，Go race 通过。
+- 用户在手机确认原先失败的家庭业务 IP 和域名均能打开。随后停止 App 确认旧 IPv6 默认路由移除，正常启动（无调试亮屏参数）并连接，确认新 IPv6 默认路由及家庭 DNS 成功应答。
+- 测试结束保留原配置与已连接的 VPN，关闭调试亮屏。二维码扫码和系统 URI 分发仍待验收。
+
+确切签名包已保存 `.deps/releases/0.3.0/entry-default-signed.hap`，SHA-256 及范围见 `build-verification.json`；0.2 历史记录见 `build-verification-v02.json`。

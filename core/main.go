@@ -8,6 +8,7 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -19,15 +20,21 @@ var running *libbox.CommandServer
 var activePlatform *harmonyPlatform
 
 type response struct {
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
+	OK        bool   `json:"ok"`
+	Message   string `json:"message"`
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 func result(err error, msg string) *C.char {
+	code := ""
 	if err != nil {
 		msg = err.Error()
+		if strings.Contains(strings.ToLower(msg), "start protected wireguard udp") {
+			code, msg = wireGuardFailure(err, false)
+			code = "wg-" + code
+		}
 	}
-	b, _ := json.Marshal(response{err == nil, msg})
+	b, _ := json.Marshal(response{OK: err == nil, Message: msg, ErrorCode: code})
 	return C.CString(string(b))
 }
 
@@ -75,6 +82,7 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName 
 	}
 	normalized = runtimeSettings(normalized, path)
 	activeLogRedactions = logRedactions(C.GoString(config))
+	configureWireGuardDiagnostics(C.GoString(config))
 	if err = libbox.Setup(&libbox.SetupOptions{BasePath: path, WorkingPath: path, TempPath: path, LogMaxLines: 100, OomKillerDisabled: true}); err != nil {
 		return result(err, "")
 	}
@@ -112,6 +120,8 @@ func SBStop() *C.char {
 		running = nil
 		activePlatform = nil
 	}
+	wireGuardTargets = nil
+	wireGuardProbes = map[string]wireGuardProbe{}
 	return result(nil, "已停止")
 }
 

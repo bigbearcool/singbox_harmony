@@ -1,0 +1,5 @@
+package wireguard
+
+func (w *Endpoint) HarmonyWireGuardStatus() string {
+ return w.endpoint.HarmonyWireGuardStatus()
+}
