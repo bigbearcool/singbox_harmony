@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-25",
+  "version": "0.7.3",
+  "baselineCommit": "adcffef",
+  "status": "signed, installed and device verified for branding, folded/expanded layout and cellular regression",
+  "deviceInstalled": true,
+  "signed": true,
+  "hapPath": ".deps/releases/0.7.3/entry-default-signed.hap",
+  "hapSha256": "b8c7c4af65e6bf90eea090ec12f57bf8facfe5d2dec32b08fc39201affa4fa67",
+  "hapBytes": 62876133,
+  "nativeCoreAndBridgeIdenticalToV061": true,
+  "checks": {
+    "ets": "PASS: 13 actual-source modules including window inset/density/resize/lifecycle tests; substitute SDK",
+    "hvigor": "PASS: assembleHap, widget compilation and SignHap",
+    "signature": "PASS: official verify-app digest and permission signature",
+    "package": "PASS: CRC, arm64/TLSDESC/linkage and current core after SDK strip transform",
+    "icon": "PASS: generated bear with exact VPN lettering; SDK 512px icon visually checked, old SVG absent; actual launcher/card use new image",
+    "visual": "PASS: 6 native pages checked, folded 1008x2232 and user-expanded 3184x2232, full top header and no white bottom band",
+    "safeArea": "PASS: actual system insets, density conversion and window-size callback; measured top 38.9565vp and bottom 27.8261vp",
+    "desktop": "PASS: existing actual desktop card displays new palette/icon and opens overview",
+    "network": "PASS after normal cold launch: dual-stack HTTP, DNS A, configured empty AAAA and encrypted WireGuard home DNS reply",
+    "preservation": "PASS: original selected, original plus runtime alias byte-identical, settings unchanged from session start",
+    "cleanup": "PASS: debug keep-awake ended through normal cold launch; public screenshot/layout files removed; VPN remains connected"
+  },
+  "assets": {
+    "icon": "AppScope/resources/base/media/app_icon.png",
+    "reference": "docs/brand/ip-reference.png",
+    "prompts": "docs/brand/README.md",
+    "tool": "built-in imagegen, no CLI fallback"
+  },
+  "pending": [
+    "Wi-Fi conditions and switches explicitly deferred by user",
+    "Unplugged idle lockscreen and overnight battery/residency",
+    "Natural repeat subscription scheduling",
+    "App include/exclude routing and remaining SFM/platform gaps",
+    "First authorization, card remove/re-add and other peripheral UI matrices"
+  ]
+}

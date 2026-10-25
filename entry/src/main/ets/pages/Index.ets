@@ -13,6 +13,7 @@ import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
 import { VpnScope, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
 import { parseWifiNames } from '../common/WifiConditions';
 import { validShortcutAction, runShortcutAction } from '../common/ShortcutActions';
+import { BRAND, BEAR_THEME } from '../common/BrandTheme';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
 import { SavedProfile, ProfileLibrary, AppSettings, ProfileFetchCancellation, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
@@ -53,6 +54,11 @@ struct Index {
  @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
  @StorageLink('pendingShortcut') @Watch('consumeShortcut') private pendingShortcut: string='';
  private shortcutHandling: boolean=false;
+ @StorageLink('windowSafeTop') private windowSafeTop: number=0;
+ @StorageLink('windowSafeBottom') private windowSafeBottom: number=0;
+ @StorageLink('windowSafeLeft') private windowSafeLeft: number=0;
+ @StorageLink('windowSafeRight') private windowSafeRight: number=0;
+ @StorageLink('windowLayoutReady') private windowLayoutReady: boolean=false;
  @StorageLink('backgroundSessionStatus') private backgroundSessionStatus: string='后台保障未运行';
  @State private locationChanging: boolean=false;
  @StorageLink('appForeground') @Watch('updateForeground') private appForeground: boolean=false;
@@ -132,6 +138,7 @@ struct Index {
     }
     if(latest.phase!=='running'){this.uploadRate=0;this.downloadRate=0;}
     this.status=latest;
+    if(latest.phase==='running' && ['正在连接','正在重新连接'].includes(this.message)){this.message='';}
    }
   } catch(_error) {}
   if(this.waitingSince>0 && this.status.phase==='starting' && Date.now()-this.waitingSince>60000){
@@ -420,32 +427,45 @@ struct Index {
   return this.dashboard.connections.filter((c: ConnectionInfo): boolean => `${c.domain} ${c.destination} ${c.outbound}`.toLowerCase().includes(query));
  }
 
- @Builder private title(text: string) {Text(text).fontSize(26).fontWeight(FontWeight.Bold).fontColor('#17324D').width('100%')}
+ @Builder private title(text: string) {Text(text).fontSize(26).fontWeight(FontWeight.Bold).fontColor(BRAND.text).width('100%')}
  // Object-literal argument keeps dynamic text bound by reference in ArkUI.
- @Builder private note(params: NoteText) {Text(params.value).fontSize(13).fontColor('#657687').width('100%')}
+ @Builder private note(params: NoteText) {Text(params.value).fontSize(13).fontColor(BRAND.muted).width('100%')}
  @Builder private overview() {
   Column({space:18}) {
-   this.title('熊盒 VPN')
+   Row({space:14}) {
+    Image($r('app.media.app_icon')).width(58).height(58).borderRadius(17).objectFit(ImageFit.Contain)
+    Column({space:4}) {
+     Text('熊盒 VPN').fontSize(25).fontWeight(FontWeight.Bold).fontColor(BRAND.text)
+     Text('BEARBOX · PRIVATE NETWORK').fontSize(9).letterSpacing(1).fontColor(BRAND.muted)
+    }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+   }.width('100%')
    this.note({value:this.coreVersion})
    Column({space:14}) {
-    Text(this.status.phase==='running'?'已连接':this.status.phase==='checking'?'状态待确认':this.status.phase==='paused'?'已暂停':this.status.phase==='reconnecting'?'等待重连':this.status.phase==='starting'?'连接中':'未连接').fontSize(28).fontWeight(FontWeight.Medium)
-    Text(this.status.message).fontSize(14).fontColor('#657687')
+    Row({space:9}) {
+     Circle().width(8).height(8).fill(this.status.phase==='running'?BRAND.cyan:BRAND.muted)
+     Text(this.status.phase==='running'?'已连接':this.status.phase==='checking'?'状态待确认':this.status.phase==='paused'?'已暂停':this.status.phase==='reconnecting'?'等待重连':this.status.phase==='starting'?'连接中':'未连接').fontSize(28).fontWeight(FontWeight.Bold).fontColor(BRAND.text)
+    }.justifyContent(FlexAlign.Center).width('100%')
+    Text(this.status.message).fontSize(14).fontColor(BRAND.muted)
     Text(this.selectedName()).fontSize(16).fontWeight(FontWeight.Medium)
     if(this.status.phase==='running'){
      this.note({value:`${this.status.networkType || ''} · ${this.status.physicalIPv6Available?'基础网络支持 IPv6':'基础网络未报告 IPv6'}`})
      this.note({value:`IPv4 + IPv6 · MTU 1280 · ${this.status.tunName}`})
-     Text(`↑ ${bytesLabel(this.uploadRate)}/s     ↓ ${bytesLabel(this.downloadRate)}/s`).fontSize(18).fontWeight(FontWeight.Medium)
+     Row({space:16}) {
+      Column({space:5}) {Text('上行速率').fontSize(11).fontColor(BRAND.muted);Text(`${bytesLabel(this.uploadRate)}/s`).fontSize(21).fontWeight(FontWeight.Medium).fontColor(BRAND.cyan)}.layoutWeight(1)
+      Divider().vertical(true).height(35).color(BRAND.line)
+      Column({space:5}) {Text('下行速率').fontSize(11).fontColor(BRAND.muted);Text(`${bytesLabel(this.downloadRate)}/s`).fontSize(21).fontWeight(FontWeight.Medium).fontColor(BRAND.cyan)}.layoutWeight(1)
+     }.width('100%').padding({top:10,bottom:10})
      this.note({value:`累计上行 ${bytesLabel(this.status.uplink || 0)} · 下行 ${bytesLabel(this.status.downlink || 0)}`})
     }
-    Button(this.active()?'断开连接':'连接 VPN').width('100%').height(52).backgroundColor('#17324D').enabled(!this.busy).onClick(() => {this.toggle();})
+    Button(this.active()?'断开连接':'连接 VPN').width('100%').height(52).backgroundColor(this.active()?BRAND.dangerSurface:BRAND.cyan).fontColor(this.active()?BRAND.coral:BRAND.onAccent).fontWeight(FontWeight.Bold).border({width:1,color:this.active()?BRAND.dangerLine:BRAND.cyan}).enabled(!this.busy).onClick(() => {this.toggle();})
     if(this.status.phase==='running' || this.status.phase==='checking'){
      Row({space:12}) {
-      Button('重新连接').layoutWeight(1).enabled(!this.controlBusy && !this.busy).onClick(() => {this.control('reconnect');})
-      Button(this.probing?'检查中…':'检查连接').layoutWeight(1).enabled(!this.probing).onClick(() => {this.probe();})
+      Button('重新连接').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).layoutWeight(1).enabled(!this.controlBusy && !this.busy).onClick(() => {this.control('reconnect');})
+      Button(this.probing?'检查中…':'检查连接').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).layoutWeight(1).enabled(!this.probing).onClick(() => {this.probe();})
      }.width('100%')
     }
     if(this.probeResult){this.note({value:this.probeResult})}
-   }.padding(22).width('100%').backgroundColor(Color.White).borderRadius(22)
+   }.padding(22).width('100%').backgroundColor(BRAND.surface).borderRadius(22).border({width:1,color:BRAND.line})
    if(this.status.phase==='running'){
     ForEach(this.dashboard.wireGuard,(wg: WireGuardInfo) => {
      Column({space:12}) {
@@ -454,18 +474,18 @@ struct Index {
       this.note({value:`家庭目标地址族：${wg.ipv4?'IPv4 ':''}${wg.ipv6?'IPv6':''}`})
       ForEach(wg.peers,(peer: WireGuardPeer) => {
        Text(peer.lastHandshake>0?`Peer ${peer.index} · 最近握手 ${new Date(peer.lastHandshake*1000).toLocaleString()}`:`Peer ${peer.index} · 尚无握手记录`).fontSize(13).width('100%')
-       Text(`加密发送 ${bytesLabel(peer.txBytes)} · 接收 ${bytesLabel(peer.rxBytes)}`).fontSize(13).fontColor('#657687').width('100%')
+       Text(`加密发送 ${bytesLabel(peer.txBytes)} · 接收 ${bytesLabel(peer.rxBytes)}`).fontSize(13).fontColor(BRAND.muted).width('100%')
       },(peer: WireGuardPeer): string => `${peer.index}-${peer.lastHandshake}-${peer.txBytes}-${peer.rxBytes}`)
       if(this.status.bindFailure){this.note({value:`底层网络绑定失败次数：${this.status.bindFailure}`})}
       if(wg.dnsConfigured && !wg.dnsCovered){this.note({value:'家庭 DNS 不在 peer 的 AllowedIPs 中，请检查配置。'})}
-      Button(this.controlBusy?'检查中…':'检查家庭 DNS').width('100%').enabled(!this.controlBusy && wg.active && wg.dnsConfigured && wg.dnsCovered).onClick(() => {this.control('wg-probe','',wg.tag);})
+      Button(this.controlBusy?'检查中…':'检查家庭 DNS').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.controlBusy && wg.active && wg.dnsConfigured && wg.dnsCovered).onClick(() => {this.control('wg-probe','',wg.tag);})
       if(!wg.dnsConfigured){this.note({value:'该通道未配置可供检查的 UDP DNS，可先查看握手和加密收发计数。'})}
       if(wg.lastProbe){this.note({value:`上次检查：${wg.lastProbe.summary}\n${new Date(wg.lastProbe.updatedAt).toLocaleString()}`})}
-     }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(22)
+     }.padding(20).width('100%').backgroundColor(BRAND.surface).borderRadius(22).border({width:1,color:BRAND.line})
     },(wg: WireGuardInfo): string => `${wg.tag}-${wg.peers.map((peer: WireGuardPeer): string => `${peer.lastHandshake}:${peer.txBytes}:${peer.rxBytes}`).join('|')}-${wg.lastProbe?.updatedAt || 0}`)
    }
    this.note({value:'连接使用所选配置的分流规则；网络切换时按设置自动重连。'})
-  }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
+  }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
  @Builder private profilesPage() {
   Column({space:16}) {
@@ -475,43 +495,43 @@ struct Index {
      Text(`${record.id===this.library.selected?'● ':''}${record.name}`).fontSize(18).fontWeight(FontWeight.Medium).width('100%')
      this.note({value:`${record.url?'远程配置':'本地配置'} · ${new Date(record.updatedAt).toLocaleString()}`})
      Row({space:8}) {
-      Button(record.id===this.library.selected?'当前配置':'选用').fontSize(13).enabled(!this.busy && !this.active() && record.id!==this.library.selected).onClick(() => {this.choose(record);})
-      Button('编辑').fontSize(13).enabled(!this.busy && !this.active()).onClick(() => {this.edit(record);})
-      Button('导出').fontSize(13).enabled(!this.busy).onClick(() => {this.exportDocument(`${record.name}.json`,readProfile(this.context.filesDir,record.id));})
-      if(record.id!==this.library.selected){Button('删除').fontSize(13).enabled(!this.busy && !this.active()).onClick(() => {this.deleteProfile(record);})}
+      Button(record.id===this.library.selected?'当前配置':'选用').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(13).enabled(!this.busy && !this.active() && record.id!==this.library.selected).onClick(() => {this.choose(record);})
+      Button('编辑').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(13).enabled(!this.busy && !this.active()).onClick(() => {this.edit(record);})
+      Button('导出').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(13).enabled(!this.busy).onClick(() => {this.exportDocument(`${record.name}.json`,readProfile(this.context.filesDir,record.id));})
+      if(record.id!==this.library.selected){Button('删除').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).fontSize(13).enabled(!this.busy && !this.active()).onClick(() => {this.deleteProfile(record);})}
      }.width('100%')
      if(record.url){
-      Button('更新配置').width('100%').enabled(!this.busy).onClick(() => {this.refresh(record);})
-      Button('显示导入二维码').width('100%').enabled(!this.busy).onClick(() => {this.showProfileCode(record);})
+      Button('更新配置').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy).onClick(() => {this.refresh(record);})
+      Button('显示导入二维码').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy).onClick(() => {this.showProfileCode(record);})
        Row(){Text('自动更新').fontSize(12).layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:record.autoUpdateHours>0}).onChange((value: boolean) => {if(value!==(record.autoUpdateHours>0)){this.toggleAutoUpdate(record,value);}})}.width('100%')
        if(record.autoUpdateHours>0){Select([{value:'1 小时'},{value:'6 小时'},{value:'12 小时'},{value:'24 小时'},{value:'7 天'}]).value(record.autoUpdateHours===168?'7 天':`${record.autoUpdateHours} 小时`).onSelect((index: number) => {this.setUpdateHours(record,[1,6,12,24,168][index]);})}
      }
-    }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
+    }.padding(18).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
    },(record: SavedProfile): string => `${record.id}-${record.name}-${record.updatedAt}-${record.autoUpdateHours}-${this.library.selected}`)
    Column({space:12}) {
     TextInput({text:this.editorName,placeholder:'配置名称'}).onChange((value: string) => {this.editorName=value;}).enabled(!this.busy && !this.active())
     Row({space:8}) {
-     Button('本地文件').layoutWeight(1).enabled(!this.busy && !this.active()).onClick(() => {this.importFile();})
-     Button('剪贴板').layoutWeight(1).enabled(!this.busy && !this.active()).onClick(() => {this.pasteProfile();})
+     Button('本地文件').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).layoutWeight(1).enabled(!this.busy && !this.active()).onClick(() => {this.importFile();})
+     Button('剪贴板').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).layoutWeight(1).enabled(!this.busy && !this.active()).onClick(() => {this.pasteProfile();})
     }.width('100%')
-    Button('扫码导入').width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.scanProfile();})
+    Button('扫码导入').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.scanProfile();})
     if(this.sharedCode){
-     QRCode(this.sharedCode).width(220).height(220).color('#17324D').backgroundColor(Color.White)
+     QRCode(this.sharedCode).width(220).height(220).color(BRAND.background).backgroundColor(Color.White)
      this.note({value:'二维码包含配置访问链接，请只展示给可信设备。'})
-     Button('关闭二维码').width('100%').onClick(() => {this.sharedCode='';})
+     Button('关闭二维码').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.sharedCode='';})
     }
     TextInput({text:this.remoteURL,placeholder:'远程 sing-box JSON 链接'}).type(InputType.Password).onChange((value: string) => {this.remoteURL=value;}).enabled(!this.busy && !this.active())
-    Button('下载并导入').width('100%').enabled(!this.busy && !this.active() && this.remoteURL.length>0).onClick(() => {this.importRemote();})
-    Button('新建 JSON 配置').width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorContent='';this.editorVisible=true;})
-    Button('添加直连诊断配置').width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorName='直连诊断';this.editorContent=DIRECT_PROFILE;this.editorVisible=true;})
+    Button('下载并导入').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy && !this.active() && this.remoteURL.length>0).onClick(() => {this.importRemote();})
+    Button('新建 JSON 配置').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorContent='';this.editorVisible=true;})
+    Button('添加直连诊断配置').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorName='直连诊断';this.editorContent=DIRECT_PROFILE;this.editorVisible=true;})
     if(this.editorVisible){
      TextArea({text:this.editorContent,placeholder:'粘贴完整 sing-box JSON'}).height(260).fontFamily('monospace').fontSize(12).maxLength(1048576).enabled(!this.busy && !this.active()).onChange((value: string) => {this.editorContent=value;})
-     Button('校验并保存').width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.saveEditor();})
-     Button('关闭编辑').width('100%').enabled(!this.busy).onClick(() => {this.editorVisible=false;this.editorContent='';})
+     Button('校验并保存').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy && !this.active()).onClick(() => {this.saveEditor();})
+     Button('关闭编辑').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.busy).onClick(() => {this.editorVisible=false;this.editorContent='';})
     }
     this.note({value:'支持 sing-box JSON，保留节点、WireGuard 和分流规则。导出文件包含节点凭据，请妥善保存。'})
-   }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
-  }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
+   }.padding(18).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
+  }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
  @Builder private groupsPage() {
   Column({space:16}) {
@@ -523,21 +543,21 @@ struct Index {
      Column({space:10}) {
       Text(group.tag).fontSize(20).fontWeight(FontWeight.Medium).width('100%')
       this.note({value:`${group.type} · 当前：${group.selected}`})
-      Button('测试本组延迟').width('100%').enabled(!this.controlBusy).onClick(() => {this.control('urltest','',group.tag);})
+      Button('测试本组延迟').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.controlBusy).onClick(() => {this.control('urltest','',group.tag);})
       ForEach(group.items,(item: GroupItem) => {
        Row({space:8}) {
         Column({space:4}) {
          Text(`${group.selected===item.tag?'● ':''}${item.tag}`).fontSize(15).width('100%')
-         Text(`${item.type} · ${item.urlTestDelay?`${item.urlTestDelay} ms`:'尚无有效延迟'}`).fontSize(12).fontColor('#657687').width('100%')
+         Text(`${item.type} · ${item.urlTestDelay?`${item.urlTestDelay} ms`:'尚无有效延迟'}`).fontSize(12).fontColor(BRAND.muted).width('100%')
         }.layoutWeight(1)
-        Button('测速').fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('urltest','',item.tag);})
-        if(group.selectable){Button('选择').fontSize(12).enabled(!this.controlBusy && group.selected!==item.tag).onClick(() => {this.control('select',group.tag,item.tag);})}
+        Button('测速').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('urltest','',item.tag);})
+        if(group.selectable){Button('选择').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(12).enabled(!this.controlBusy && group.selected!==item.tag).onClick(() => {this.control('select',group.tag,item.tag);})}
        }.width('100%').padding({top:8,bottom:8})
       },(item: GroupItem): string => item.tag)
-     }.padding(18).width('100%').backgroundColor(Color.White).borderRadius(20)
+     }.padding(18).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
     },(group: OutboundGroup): string => `${group.tag}-${group.selected}-${group.items.map((item: GroupItem): string => `${item.tag}:${item.urlTestTime || 0}:${item.urlTestDelay || 0}`).join('|')}`)
    }
-  }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
+  }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
  @Builder private connectionsPage() {
   Column({space:14}) {
@@ -546,17 +566,17 @@ struct Index {
    else {
     TextInput({text:this.connectionFilter,placeholder:'搜索域名、地址或出站'}).onChange((value: string) => {this.connectionFilter=value;})
     this.note({value:`活动连接 ${this.dashboard.connections.length}（最多显示最新 200 条）`})
-    Button('关闭全部连接').width('100%').enabled(!this.controlBusy).onClick(() => {this.control('close-all');})
+    Button('关闭全部连接').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).width('100%').enabled(!this.controlBusy).onClick(() => {this.control('close-all');})
     ForEach(this.visibleConnections(),(item: ConnectionInfo) => {
      Column({space:8}) {
       Text(item.domain || item.destination).fontSize(16).fontWeight(FontWeight.Medium).width('100%').onClick(() => {this.expandedConnection=this.expandedConnection===item.id?'':item.id;})
       this.note({value:`${item.network} · ${item.outbound} · ↑ ${bytesLabel(item.upload)} ↓ ${bytesLabel(item.download)}`})
       if(this.expandedConnection===item.id){this.note({value:`源：${item.source}\n目标：${item.destination}\n规则：${item.rule || '默认路由'}\n建立：${new Date(item.createdAt).toLocaleString()}`})}
-      Button('关闭此连接').fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('close','','',item.id);})
-     }.padding(16).width('100%').backgroundColor(Color.White).borderRadius(18)
+      Button('关闭此连接').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('close','','',item.id);})
+     }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
     },(item: ConnectionInfo): string => `${item.id}-${item.upload}-${item.download}`)
    }
-  }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
+  }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
  @Builder private logsPage() {
   Column({space:14}) {
@@ -564,12 +584,12 @@ struct Index {
    this.note({value:this.status.phase==='running'?'内核日志，仅保留本机最近 100 条':'上次运行的日志快照'})
    TextInput({text:this.logFilter,placeholder:'筛选日志内容'}).onChange((value: string) => {this.logFilter=value;})
    Row({space:10}) {
-    Button('清空').layoutWeight(1).enabled(this.status.phase==='running' && !this.controlBusy).onClick(() => {this.control('clear-logs');})
-    Button('导出日志').layoutWeight(1).enabled(!this.busy).onClick(() => {this.exportDocument('bearbox-logs.txt',this.dashboard.logs.join('\n'));})
+    Button('清空').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).layoutWeight(1).enabled(this.status.phase==='running' && !this.controlBusy).onClick(() => {this.control('clear-logs');})
+    Button('导出日志').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).layoutWeight(1).enabled(!this.busy).onClick(() => {this.exportDocument('bearbox-logs.txt',this.dashboard.logs.join('\n'));})
    }.width('100%')
-   ForEach(this.dashboard.logs.filter((line: string): boolean => line.toLowerCase().includes(this.logFilter.toLowerCase())),(line: string) => {Text(line).fontSize(12).fontFamily('monospace').fontColor('#314456').width('100%').copyOption(CopyOptions.InApp)},(line: string,index: number): string => `${index}-${line}`)
+   ForEach(this.dashboard.logs.filter((line: string): boolean => line.toLowerCase().includes(this.logFilter.toLowerCase())),(line: string) => {Text(line).fontSize(12).fontFamily('monospace').fontColor(BRAND.text).width('100%').copyOption(CopyOptions.InApp)},(line: string,index: number): string => `${index}-${line}`)
    if(this.dashboard.logs.length===0){this.note({value:'暂无日志。可在设置中调整日志级别后重新连接。'})}
-  }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
+  }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
  @Builder private settingsPage() {
   Column({space:18}) {
@@ -578,11 +598,11 @@ struct Index {
     Row(){Text('定位辅助驻留（实验）').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.locationAssist}).enabled(!this.locationChanging && !this.busy).onChange((value: boolean) => {if(value!==this.settings.locationAssist){this.toggleLocationAssist(value);}})}.width('100%')
     this.note({value:'默认使用数据传输后台任务。此开关默认关闭，开启后改用低功耗模糊定位；坐标即时丢弃，不保存或上传。两种模式均显示系统通知，仅 VPN 连接期间运行，驻留效果及耗电待实测。'})
     this.note({value:this.backgroundSessionStatus})
-    Button(this.applicationScopeExpanded?'收起应用范围':'设置哪些应用使用 VPN').width('100%').onClick(() => {this.applicationScopeExpanded=!this.applicationScopeExpanded;})
+    Button(this.applicationScopeExpanded?'收起应用范围':'设置哪些应用使用 VPN').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.applicationScopeExpanded=!this.applicationScopeExpanded;})
     if(this.applicationScopeExpanded){
      Select([{value:'所有应用'},{value:'仅指定应用'},{value:'排除指定应用'}]).value(this.applicationScope.mode==='include'?'仅指定应用':this.applicationScope.mode==='exclude'?'排除指定应用':'所有应用').onSelect((index: number) => {this.applicationScope={mode:['all','include','exclude'][index],applications:this.applicationScope.applications};})
      if(this.applicationScope.mode!=='all'){TextArea({text:this.applicationScopeText,placeholder:'每行一个应用包名，例如 com.example.app'}).height(110).onChange((value: string) => {this.applicationScopeText=value;})}
-     Button('保存应用范围').width('100%').onClick(() => {this.saveApplicationScope();})
+     Button('保存应用范围').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.saveApplicationScope();})
      this.note({value:'默认接管所有应用。仅指定或排除模式会改变系统引流范围，下次连接生效；应用内分流继续遵循原配置。'})
     }
     Row(){Text('网络切换或掉线后自动重连').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoReconnect}).onChange((value: boolean) => {this.settings.autoReconnect=value;this.saveOptions();})}.width('100%')
@@ -590,7 +610,7 @@ struct Index {
     Row(){Text('指定 Wi-Fi 暂停 VPN').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.onDemand}).onChange((value: boolean) => {this.settings.onDemand=value;this.saveOptions();})}.width('100%')
     if(this.settings.onDemand){
      TextArea({text:this.wifiRulesText,placeholder:'每行一个 Wi-Fi 名称，精确匹配'}).height(100).onChange((value: string) => {this.wifiRulesText=value;})
-     Button('保存 Wi-Fi 规则').width('100%').onClick(() => {try {this.settings.bypassWifi=parseWifiNames(this.wifiRulesText);this.wifiRulesText=this.settings.bypassWifi.join('\n');this.saveOptions();} catch(_error) {this.message='未保存，请填写有效 Wi-Fi 名称（每行一个，最多 128 个，名称最多 32 字节）';}})
+     Button('保存 Wi-Fi 规则').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {try {this.settings.bypassWifi=parseWifiNames(this.wifiRulesText);this.wifiRulesText=this.settings.bypassWifi.join('\n');this.saveOptions();} catch(_error) {this.message='未保存，请填写有效 Wi-Fi 名称（每行一个，最多 128 个，名称最多 32 字节）';}})
      this.note({value:'服务运行时进入这些 Wi-Fi 会暂停隧道，离开后恢复；系统结束服务后，需要重新打开 App。'})
     }
     this.note({value:this.status.wifiConditionStatus || '连接时读取底层网络的 Wi-Fi 条件。'})
@@ -602,28 +622,36 @@ struct Index {
     if(this.updateReport.updatedAt>0){this.note({value:`上次自动检查：${new Date(this.updateReport.updatedAt).toLocaleString()} · ${this.updateReport.source==='background'?'系统后台':'前台'} · ${this.updateReport.phase==='completed'?`已更新 ${this.updateReport.updated}，失败 ${this.updateReport.failed}`:this.updateReport.phase==='running'?'本轮检查已开始，完成结果待确认':this.updateReport.phase==='cancelled'?'已停止本轮更新':this.updateReport.phase==='busy'?'本轮未取得更新锁':'本轮未完成'}`})}
     Row(){Text('日志级别').layoutWeight(1);Select([{value:'warn'},{value:'info'},{value:'debug'},{value:'error'}]).value(this.settings.logLevel).onSelect((_index: number,value?: string) => {this.settings.logLevel=value || 'warn';this.saveOptions();})}.width('100%')
     this.note({value:'日志级别在下次连接时应用。'})
-    Button('重置网络连接与 DNS 缓存').width('100%').enabled(this.status.phase==='running' && !this.controlBusy).onClick(() => {this.control('reset-network');})
+    Button('重置网络连接与 DNS 缓存').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(this.status.phase==='running' && !this.controlBusy).onClick(() => {this.control('reset-network');})
     if(this.dashboard.modes.length>0){
      this.note({value:`路由模式：${this.dashboard.mode}`})
-     ForEach(this.dashboard.modes,(mode: string) => {Button(mode).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
+     ForEach(this.dashboard.modes,(mode: string) => {Button(mode).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
     }
-   }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(20)
-   this.note({value:`熊盒 VPN 0.6 · ${this.coreVersion}`})
+   }.padding(20).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
+   this.note({value:`熊盒 VPN 0.7 · ${this.coreVersion}`})
    this.note({value:'配置和日志仅保存在本机。'})
-  }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
+  }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
+ }
+ @Builder private tabLabel(index: number,label: string) {
+  Column({space:5}) {
+   Text(label).fontSize(12).fontWeight(this.activeTab===index?FontWeight.Bold:FontWeight.Medium).fontColor(this.activeTab===index?BRAND.cyan:BRAND.muted)
+   Row().width(16).height(2).borderRadius(1).backgroundColor(this.activeTab===index?BRAND.cyan:Color.Transparent)
+  }.padding({top:10,bottom:8,left:2,right:2}).justifyContent(FlexAlign.Center)
  }
  build() {
+  WithTheme({theme:BEAR_THEME,colorMode:ThemeColorMode.DARK}) {
   Column() {
    Tabs({index:this.activeTab,barPosition:BarPosition.End}) {
-    TabContent(){Scroll(){this.overview()}.width('100%').height('100%')}.tabBar('总览')
-    TabContent(){Scroll(){this.profilesPage()}.width('100%').height('100%')}.tabBar('配置')
-    TabContent(){Scroll(){this.groupsPage()}.width('100%').height('100%')}.tabBar('节点')
-    TabContent(){Scroll(){this.connectionsPage()}.width('100%').height('100%')}.tabBar('连接')
-    TabContent(){Scroll(){this.logsPage()}.width('100%').height('100%')}.tabBar('日志')
-    TabContent(){Scroll(){this.settingsPage()}.width('100%').height('100%')}.tabBar('设置')
-   }.barMode(BarMode.Scrollable).scrollable(false).onChange((index: number) => {this.activeTab=index;this.readStatus();}).layoutWeight(1)
-   if(this.message){Text(this.message).fontSize(13).fontColor('#314456').padding(12).width('100%').backgroundColor('#E7EEF4')}
-  }.width('100%').height('100%').backgroundColor('#F3F6F9')
+    TabContent(){Scroll(){this.overview()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabLabel(0,'总览'))
+    TabContent(){Scroll(){this.profilesPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabLabel(1,'配置'))
+    TabContent(){Scroll(){this.groupsPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabLabel(2,'节点'))
+    TabContent(){Scroll(){this.connectionsPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabLabel(3,'连接'))
+    TabContent(){Scroll(){this.logsPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabLabel(4,'日志'))
+    TabContent(){Scroll(){this.settingsPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabLabel(5,'设置'))
+   }.barMode(BarMode.Fixed).barBackgroundColor(BRAND.background).scrollable(false).onChange((index: number) => {this.activeTab=index;this.readStatus();}).layoutWeight(1)
+   if(this.message){Text(this.message).fontSize(13).fontColor(BRAND.text).padding(12).width('100%').backgroundColor(BRAND.soft)}
+  }.width('100%').height('100%').padding({top:this.windowSafeTop,bottom:this.windowSafeBottom,left:this.windowSafeLeft,right:this.windowSafeRight}).backgroundColor(BRAND.background).opacity(this.windowLayoutReady?1:0)
+  }
  }
 }
 

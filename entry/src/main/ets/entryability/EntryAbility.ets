@@ -6,9 +6,13 @@ import { setDiagnosticProfile } from '../common/ProfileStore';
 import { parseProfileImportLink } from '../common/ProfileLinks';
 import { shortcutActionFromWant } from '../common/ShortcutActions';
 import { util } from '@kit.ArkTS';
+import { BRAND } from '../common/BrandTheme';
+import { WindowLayout } from '../common/WindowLayout';
 
 export default class EntryAbility extends UIAbility {
  private diagnosticsKeepAwake: boolean = false;
+ private windowLayout?: WindowLayout;
+ private uiAlive: boolean=true;
  onCreate(want: Want): void {
   this.handleDiagnostics(want);
   this.handleLink(want);
@@ -31,7 +35,7 @@ export default class EntryAbility extends UIAbility {
  onNewWant(want: Want): void {this.handleDiagnostics(want);this.handleLink(want);this.handleShortcut(want);}
  onForeground(): void {AppStorage.setOrCreate('appForeground',true);}
  onBackground(): void {AppStorage.setOrCreate('appForeground',false);}
- onDestroy(): void {AppStorage.setOrCreate('appForeground',false);}
+ onDestroy(): void {this.uiAlive=false;this.windowLayout?.stop();AppStorage.setOrCreate('appForeground',false);}
  private handleDiagnostics(want: Want): void {
   const paused=want.parameters?.diagnosticsPauseForegroundUpdates;
   if(this.context.applicationInfo.debug && typeof paused==='boolean'){AppStorage.setOrCreate('diagnosticsPauseForegroundUpdates',paused);}
@@ -45,7 +49,14 @@ export default class EntryAbility extends UIAbility {
   if(action){AppStorage.setOrCreate('pendingShortcut',JSON.stringify({action:action,id:util.generateRandomUUID(),createdAt:Date.now()}));}
  }
  onWindowStageCreate(stage: window.WindowStage): void {
-  stage.loadContent('pages/Index');
-  if(this.diagnosticsKeepAwake){stage.getMainWindow().then((main: window.Window) => {main.setWindowKeepScreenOn(true).catch(() => {});}).catch(() => {});}
+  stage.loadContent('pages/Index').then(() => stage.getMainWindow()).then((main: window.Window) => {
+   if(!this.uiAlive){return;}
+   try {main.setWindowBackgroundColor(BRAND.background);} catch(_error) {}
+   main.setWindowLayoutFullScreen(true).then(() => {
+    if(!this.uiAlive){return;}this.windowLayout=new WindowLayout();this.windowLayout.bind(main,this.context.filesDir);
+   }).catch(() => {AppStorage.setOrCreate('windowLayoutReady',true);});
+   main.setWindowSystemBarProperties({statusBarColor:BRAND.background,statusBarContentColor:BRAND.text,navigationBarColor:BRAND.background,navigationBarContentColor:BRAND.text}).catch(() => {});
+   if(this.diagnosticsKeepAwake){main.setWindowKeepScreenOn(true).catch(() => {});}
+  }).catch(() => {});
  }
 }

@@ -1,9 +1,11 @@
 # 熊盒 VPN · HarmonyOS 自用版
 
-面向华为 Mate XTs（GRL-AL20）、HarmonyOS 7 / API 26 的原生 VPN 客户端（0.5.6 自用签名版）。
+面向华为 Mate XTs（GRL-AL20）、HarmonyOS 7 / API 26 的原生 VPN 客户端（0.7.3 自用签名版）。
 ArkTS / ArkUI 界面，系统 VpnExtensionAbility 管理 TUN，C++ N-API 桥接源码构建的 sing-box。
 
 ## 当前状态
+
+**0.7.3 已安装并完成本轮验收**：以用户机甲熊 IP 制作带 VPN 铭牌的专属图标，六个页面及桌面卡片统一为青蓝／深蓝配色。已修复底部白色区域及顶部遮挡；窗口按系统安全区实时避让，折叠 1008×2232 与展开 3184×2232 均已目视核对，展开后 VPN 仍运行。13 个 ETS 测试模块、签名及包内检查通过；原配置与设置保持不变，正常冷启动的双栈及 WireGuard 家庭 DNS 复测通过。记录见 [品牌设计](docs/brand/README.md) 和 [0.7 验证摘要](docs/build-verification-v07.json)。Wi-Fi 实测仍按用户要求暂缓。
 
 **0.6.1 已安装**：Wi-Fi SSID／网络类型已接入内核；桌面卡片的实际连接、断开、重复点击、总览和冷启动连接通过，图标菜单可见且连接／断开点击通过。蜂窝双栈和 WireGuard 家庭 DNS 复测通过，原配置与设置保持不变。Wi-Fi 实测按用户要求暂缓，范围见 [Wi-Fi 与桌面入口](docs/wifi-and-quick-entry.md)。
 
