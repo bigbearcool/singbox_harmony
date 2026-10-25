@@ -9,6 +9,7 @@ import zipfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument('hap', type=Path)
+parser.add_argument('--expected-core', type=Path)
 args = parser.parse_args()
 sdk = Path(os.environ.get('DEVECO_SDK_HOME', '/Applications/DevEco-Studio.app/Contents/sdk'))
 readelf = sdk / 'default/openharmony/native/llvm/bin/llvm-readelf'
@@ -16,6 +17,16 @@ readelf = sdk / 'default/openharmony/native/llvm/bin/llvm-readelf'
 with tempfile.TemporaryDirectory() as temporary:
     files = {}
     with zipfile.ZipFile(args.hap) as package:
+        assert package.testzip() is None, 'HAP CRC error'
+        if args.expected_core:
+            expected = Path(temporary) / 'expected-core.so'
+            expected.write_bytes(args.expected_core.read_bytes())
+            packaged = package.read('libs/arm64-v8a/libsingbox.so')
+            if packaged != expected.read_bytes():
+                # Hvigor removes .comment and strips symbols. Reproduce exactly
+                # that public SDK transform, without changing the source ELF.
+                subprocess.run([str(readelf.with_name('llvm-strip')), '--strip-all', '--remove-section=.comment', str(expected)], check=True)
+            assert packaged == expected.read_bytes(), 'packaged native core differs from the current build'
         for name in ('libsingbox.so', 'libsingboxbridge.so', 'libc++_shared.so'):
             path = Path(temporary) / name
             path.write_bytes(package.read(f'libs/arm64-v8a/{name}'))
@@ -38,3 +49,5 @@ with tempfile.TemporaryDirectory() as temporary:
             for symbol in ('SBVersion', 'SBFree', 'SBCheck', 'SBStart', 'SBStop', 'SBStats', 'SBControl'):
                 assert any(line.rstrip().endswith(' ' + symbol) for line in symbols.splitlines()), f'missing {symbol}'
 print('PASS: HAP contains arm64 core, bridge and C++ runtime; ABI and portable linkage/TLS verified.')
+if args.expected_core:
+    print('PASS: packaged core matches the current build after SDK stripping.')

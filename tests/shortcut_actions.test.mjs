@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { stripTypeScriptTypes } from 'node:module';
+const source=fs.readFileSync(new URL('../entry/src/main/ets/common/ShortcutActions.ets',import.meta.url),'utf8').replace(/^import .*;\n/gm,'');
+const {shortcutActionFromWant,runShortcutAction}=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes(source,{mode:'strip'})).toString('base64'));
+assert.equal(shortcutActionFromWant({parameters:{shortcutAction:'connect'}}),'connect');assert.equal(shortcutActionFromWant({parameters:{params:JSON.stringify({shortcutAction:'disconnect'})}}),'disconnect');
+for(const want of [{},{uri:'sing-box://import-remote-profile',parameters:{shortcutAction:'connect'}},{parameters:{shortcutAction:'toggle'}},{parameters:{params:'{'}},{parameters:{params:JSON.stringify({shortcutAction:{x:'connect'}})}},{parameters:{params:'x'.repeat(1025)}}])assert.equal(shortcutActionFromWant(want),'');
+let present=false,phase='stopped';const events=[];const port={hasVpn:async()=>present,phase:()=>phase,start:async()=>{events.push('start');phase='starting'},stop:async()=>{events.push('stop');phase='stopped';present=false},reconnect:async()=>events.push('reconnect'),notify:()=>{}};
+await runShortcutAction('connect',port);await runShortcutAction('connect',port);assert.deepEqual(events,['start']);present=true;phase='running';await runShortcutAction('connect',port);assert.deepEqual(events,['start']);await runShortcutAction('disconnect',port);await runShortcutAction('disconnect',port);assert.deepEqual(events,['start','stop']);
+phase='checking';await runShortcutAction('connect',port);assert.equal(events.at(-1),'reconnect');phase='paused';const before=events.length;await runShortcutAction('connect',port);await runShortcutAction('overview',port);await runShortcutAction('invalid',port);assert.equal(events.length,before);await runShortcutAction('disconnect',port);assert.equal(events.at(-1),'stop');
+console.log('PASS: launcher/card Want parsing, import isolation, explicit idempotent connect/disconnect, paused sessions and stale-VPN recovery.');

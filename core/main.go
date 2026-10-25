@@ -58,7 +58,7 @@ func SBCheck(config *C.char) *C.char {
 }
 
 //export SBStart
-func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName *C.char, netID C.int) (res *C.char) {
+func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName *C.char, netID C.int, network *C.char) (res *C.char) {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
 	defer func() {
@@ -86,7 +86,11 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName 
 	if err = libbox.Setup(&libbox.SetupOptions{BasePath: path, WorkingPath: path, TempPath: path, LogMaxLines: 100, OomKillerDisabled: true}); err != nil {
 		return result(err, "")
 	}
-	platform := &harmonyPlatform{fd: int32(fd), iface: C.GoString(iface), tunName: C.GoString(tunName), netID: int32(netID)}
+	state, err := parsePhysicalNetworkState(C.GoString(network))
+	if err != nil {
+		return result(err, "")
+	}
+	platform := &harmonyPlatform{fd: int32(fd), iface: C.GoString(iface), tunName: C.GoString(tunName), netID: int32(netID), networkState: state}
 	if platform.netID <= 0 {
 		return result(fmt.Errorf("底层网络 ID 无效"), "")
 	}

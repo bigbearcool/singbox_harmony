@@ -15,7 +15,7 @@
 extern "C" {
 char *SBVersion();
 char *SBCheck(char *);
-char *SBStart(char *, int, char *, char *, char *, int);
+char *SBStart(char *, int, char *, char *, char *, int, char *);
 char *SBStop();
 char *SBStats();
 char *SBControl(char *);
@@ -27,7 +27,7 @@ struct Job {
  napi_async_work work = nullptr;
  napi_deferred deferred = nullptr;
  Operation operation;
- std::string config, path, interfaceName, tunName, output;
+ std::string config, path, interfaceName, tunName, network, output;
  int fd = -1;
  int netId = 0;
 };
@@ -51,7 +51,7 @@ static void Execute(napi_env, void *data) {
  switch(job->operation) {
  case Operation::Version: value=SBVersion();break;
  case Operation::Check: value=SBCheck(job->config.data());break;
- case Operation::Start: value=SBStart(job->config.data(),job->fd,job->path.data(),job->interfaceName.data(),job->tunName.data(),job->netId);break;
+ case Operation::Start: value=SBStart(job->config.data(),job->fd,job->path.data(),job->interfaceName.data(),job->tunName.data(),job->netId,job->network.data());break;
  case Operation::Stop: value=SBStop();break;
  case Operation::Stats: value=SBStats();break;
  case Operation::Control: value=SBControl(job->config.data());break;
@@ -66,11 +66,11 @@ static void Complete(napi_env env,napi_status status,void *data) {
  napi_delete_async_work(env,job->work);
 }
 static napi_value Dispatch(napi_env env,napi_callback_info info,Operation operation) {
- size_t argc=6;napi_value argv[6];napi_get_cb_info(env,info,&argc,argv,nullptr,nullptr);
+ size_t argc=7;napi_value argv[7];napi_get_cb_info(env,info,&argc,argv,nullptr,nullptr);
  auto job=std::make_unique<Job>();job->operation=operation;
  bool valid=true;
  if(operation==Operation::Check || operation==Operation::Start || operation==Operation::Control) valid=argc>=1 && StringArg(env,argv[0],job->config);
- if(operation==Operation::Start) valid=valid && argc==6 && napi_get_value_int32(env,argv[1],&job->fd)==napi_ok && job->fd>=0 && StringArg(env,argv[2],job->path) && StringArg(env,argv[3],job->interfaceName) && StringArg(env,argv[4],job->tunName) && !job->tunName.empty() && napi_get_value_int32(env,argv[5],&job->netId)==napi_ok && job->netId>0;
+ if(operation==Operation::Start) valid=valid && argc==7 && napi_get_value_int32(env,argv[1],&job->fd)==napi_ok && job->fd>=0 && StringArg(env,argv[2],job->path) && StringArg(env,argv[3],job->interfaceName) && StringArg(env,argv[4],job->tunName) && !job->tunName.empty() && napi_get_value_int32(env,argv[5],&job->netId)==napi_ok && job->netId>0 && StringArg(env,argv[6],job->network);
  if(!valid){napi_throw_type_error(env,nullptr,"无效的原生参数，配置上限 1 MiB");return nullptr;}
  napi_value promise;
  if(napi_create_promise(env,&job->deferred,&promise)!=napi_ok) return nullptr;

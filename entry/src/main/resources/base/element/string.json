@@ -1,5 +1,10 @@
 {
   "string": [
+    {"name":"quick_entry_name","value":"VPN 快捷入口"},
+    {"name":"quick_entry_description","value":"打开熊盒 VPN 并连接、断开或查看总览"},
+    {"name":"shortcut_connect","value":"连接 VPN"},
+    {"name":"shortcut_disconnect","value":"断开 VPN"},
+    {"name":"shortcut_overview","value":"VPN 总览"},
     {
       "name": "module_desc",
       "value": "鸿蒙原生双栈 VPN"

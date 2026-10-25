@@ -132,3 +132,7 @@ for relative, fixture in [('transport/wireguard/harmony_status.go', 'wireguard_s
     shutil.copyfile(root / 'core/patches' / fixture, destination)
     destination.chmod(0o644)
 print('Prepared protected WireGuard client UDP and whitelisted peer status.')
+
+# SSID is needed in memory for rules, never in the daemon log ring or exports.
+patch(target / 'route/network.go', '\t\t\tr.logger.Info("WIFI state changed: SSID=", state.SSID, ", BSSID=", state.BSSID)\n', '\t\t\tr.logger.Info("WIFI state changed")\n')
+patch(target / 'route/network_environment.go', '\tr.logger.Info("updated network environment: ", strings.Join(options, ", "))\n', '\tr.logger.Info("updated network environment")\n')

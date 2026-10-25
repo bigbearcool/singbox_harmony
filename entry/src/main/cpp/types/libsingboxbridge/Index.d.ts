@@ -1,6 +1,6 @@
 export const version: () => Promise<string>;
 export const check: (config: string) => Promise<string>;
-export const start: (config: string, fd: number, path: string, physicalInterface: string, tunName: string, netId: number) => Promise<string>;
+export const start: (config: string, fd: number, path: string, physicalInterface: string, tunName: string, netId: number, network: string) => Promise<string>;
 export const stop: () => Promise<string>;
 export const stats: () => Promise<string>;
 export const control: (request: string) => Promise<string>;

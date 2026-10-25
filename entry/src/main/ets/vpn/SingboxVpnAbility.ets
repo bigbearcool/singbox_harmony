@@ -4,7 +4,7 @@ import { Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import bridge from 'libsingboxbridge.so';
-import { wifiManager } from '@kit.ConnectivityKit';
+import { PhysicalNetworkState, observeWifi, wifiPauseDecision } from '../common/WifiConditions';
 import { loadSettings } from '../common/ProfileStore';
 import { applyVpnScope, loadVpnScope } from '../common/VpnScope';
 import { ControlRequest, ControlReply, ControlResult } from '../common/Control';
@@ -21,6 +21,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private lastControlId: string = '';
  private lastSnapshotAt: number = 0;
  private bypassCurrentWifi: boolean = false;
+ private networkState: PhysicalNetworkState={type:'other',ssid:''};
+ private lastSentNetwork: string='';
  private lastStatusWrite: number=0;
  private lastNetworkInspect: number=0;
  private lastPhaseLog: string='';
@@ -67,11 +69,12 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    if(!caps.networkCap?.includes(connection.NetCap.NET_CAPABILITY_INTERNET)) { continue; }
    const props: connection.ConnectionProperties = await connection.getConnectionProperties(handle);
    if(props.interfaceName.length>0) {
-    this.bypassCurrentWifi=false;
     const settings=loadSettings(this.context.filesDir);
-    if(settings.onDemand && settings.bypassWifi.length>0 && caps.bearerTypes.includes(connection.NetBearType.BEARER_WIFI)){
-     try {const wifi: wifiManager.WifiLinkedInfo=await wifiManager.getLinkedInfo();this.bypassCurrentWifi=settings.bypassWifi.includes(wifi.ssid);} catch(_error) {}
-    }
+    const type: string=caps.bearerTypes.includes(connection.NetBearType.BEARER_WIFI)?'wifi':caps.bearerTypes.includes(connection.NetBearType.BEARER_CELLULAR)?'cellular':'other';
+    const observation=await observeWifi(type);
+    this.bypassCurrentWifi=wifiPauseDecision(settings.onDemand,settings.bypassWifi,observation,this.bypassCurrentWifi,this.physicalNetId===handle.netId);
+    this.networkState=observation.state;
+    this.status.wifiConditionStatus=type==='wifi'?(observation.known?'Wi-Fi 条件可用（SSID）':'Wi-Fi 名称暂不可读；已清除旧名称，同网暂停状态保持'):'当前使用非 Wi-Fi 网络';
     this.physicalNetId=handle.netId;
     this.status.networkType=caps.bearerTypes.includes(connection.NetBearType.BEARER_CELLULAR)?'蜂窝网络':caps.bearerTypes.includes(connection.NetBearType.BEARER_WIFI)?'Wi-Fi':'其他网络';
     this.status.physicalIPv6Available=props.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.family===2 && !it.address.address.startsWith('fe80:'));
@@ -136,8 +139,10 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    const addresses: InterfaceAddress[] = JSON.parse(bridge.interfaces()) as InterfaceAddress[];
    this.status.ipv6AddressPresent=addresses.some((it: InterfaceAddress): boolean => it.name===this.status.tunName && it.family===6 && it.address==='fdfe:dcba:9876::1');
    if(!this.status.ipv6AddressPresent){throw new Error('系统未给 TUN 分配预期 IPv6 地址');}
-   const result: CoreResponse=JSON.parse(await bridge.start(config,fd,this.context.filesDir,this.status.physicalInterface,this.status.tunName,this.physicalNetId)) as CoreResponse;
+   const network: string=JSON.stringify(this.networkState);
+   const result: CoreResponse=JSON.parse(await bridge.start(config,fd,this.context.filesDir,this.status.physicalInterface,this.status.tunName,this.physicalNetId,network)) as CoreResponse;
    if(!result.ok){if(result.errorCode?.startsWith('wg-')){startupHint=result.message;}throw new Error('内核启动未完成');}
+   this.lastSentNetwork=network;
    writePrivate(`${this.context.filesDir}/running-profile.json`,config);
    this.requireAlive();
    this.publish('running','内核运行中；IPv4 / IPv6 默认路由已确认');
@@ -172,6 +177,11 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
     if(this.destroyed){return;}
     await this.recoverNetwork('网络已切换');
    } else {
+    const network: string=JSON.stringify(this.networkState);
+    if(network!==this.lastSentNetwork){
+     const reply: CoreResponse=JSON.parse(await bridge.control(JSON.stringify({action:'wifi-state',network:this.networkState}))) as CoreResponse;
+     if(!reply.ok){throw new Error('Wi-Fi 条件同步未完成');}this.lastSentNetwork=network;
+    }
     const stats: CoreStats=JSON.parse(await bridge.stats()) as CoreStats;
     if(this.destroyed){return;}
     this.status.uplink=stats.uplink;this.status.downlink=stats.downlink;this.status.ipv4Flows=stats.ipv4Flows;this.status.ipv6Flows=stats.ipv6Flows;

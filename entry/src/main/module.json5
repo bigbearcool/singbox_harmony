@@ -20,6 +20,8 @@
         "startWindowIcon": "$media:app_icon",
         "startWindowBackground": "$color:window_background",
         "exported": true,
+        "launchType": "singleton",
+        "metadata": [{"name":"ohos.ability.shortcuts","resource":"$profile:shortcuts_config"}],
         "skills": [
           {
             "entities": [
@@ -51,6 +53,15 @@
       }
     ],
     "extensionAbilities": [
+      {
+        "name":"QuickEntryFormAbility",
+        "srcEntry":"./ets/quickentry/QuickEntryFormAbility.ets",
+        "label":"$string:quick_entry_name",
+        "description":"$string:quick_entry_description",
+        "type":"form",
+        "exported":true,
+        "metadata":[{"name":"ohos.extension.form","resource":"$profile:form_config"}]
+      },
       {
         "name": "SingboxVpnAbility",
         "srcEntry": "./ets/vpn/SingboxVpnAbility.ets",

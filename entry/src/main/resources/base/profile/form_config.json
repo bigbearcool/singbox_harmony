@@ -1,0 +1,15 @@
+{
+ "forms":[{
+  "name":"QuickEntryCard",
+  "displayName":"$string:quick_entry_name",
+  "description":"$string:quick_entry_description",
+  "src":"./ets/quickentry/pages/QuickEntryCard.ets",
+  "uiSyntax":"arkts",
+  "renderingMode":"fullColor",
+  "isDefault":true,
+  "updateEnabled":false,
+  "defaultDimension":"2*2",
+  "supportDimensions":["2*2"],
+  "isDynamic":true
+ }]
+}

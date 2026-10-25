@@ -16,11 +16,12 @@ import (
 )
 
 type controlRequest struct {
-	Action   string `json:"action"`
-	Group    string `json:"group"`
-	Outbound string `json:"outbound"`
-	ID       string `json:"id"`
-	Mode     string `json:"mode"`
+	Action   string                `json:"action"`
+	Group    string                `json:"group"`
+	Outbound string                `json:"outbound"`
+	ID       string                `json:"id"`
+	Mode     string                `json:"mode"`
+	Network  *physicalNetworkState `json:"network,omitempty"`
 }
 
 type groupSnapshot struct {
@@ -76,6 +77,17 @@ func logRedactions(config string) []string {
 		case map[string]any:
 			for key, child := range item {
 				switch key {
+				case "wifi_ssid", "wifi_bssid":
+					if text, ok := child.(string); ok && text != "" {
+						values[text] = true
+					}
+					if list, ok := child.([]any); ok {
+						for _, value := range list {
+							if text, ok := value.(string); ok && text != "" {
+								values[text] = true
+							}
+						}
+					}
 				case "server", "server_name", "address", "uuid", "password", "private_key", "public_key", "pre_shared_key", "short_id":
 					if text, ok := child.(string); ok && len(text) > 3 {
 						values[text] = true
@@ -129,6 +141,17 @@ func coreControl(input string) string {
 		defer cancel()
 		var err error
 		switch request.Action {
+		case "wifi-state":
+			if request.Network == nil || activePlatform == nil {
+				err = errors.New("网络状态不可用")
+				break
+			}
+			encoded, _ := json.Marshal(request.Network)
+			var state physicalNetworkState
+			state, err = parsePhysicalNetworkState(string(encoded))
+			if err == nil && activePlatform.setNetworkState(state) {
+				running.UpdateWIFIState()
+			}
 		case "snapshot":
 			data := &dashboardSnapshot{Groups: []*daemon.Group{}, Connections: []connectionView{}, Logs: []string{}, Modes: []string{}}
 			data.WireGuard = wireGuardViews()

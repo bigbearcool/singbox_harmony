@@ -11,6 +11,8 @@ import { ScheduleStatus, readScheduleStatus, syncSubscriptionSchedule } from '..
 import { UpdateReport, readUpdateReport, runDueProfileUpdates } from '../common/SubscriptionUpdates';
 import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
 import { VpnScope, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
+import { parseWifiNames } from '../common/WifiConditions';
+import { validShortcutAction, runShortcutAction } from '../common/ShortcutActions';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
 import { SavedProfile, ProfileLibrary, AppSettings, ProfileFetchCancellation, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
@@ -49,6 +51,8 @@ struct Index {
  @State private wifiRulesText: string='';
  @State private sharedCode: string='';
  @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
+ @StorageLink('pendingShortcut') @Watch('consumeShortcut') private pendingShortcut: string='';
+ private shortcutHandling: boolean=false;
  @StorageLink('backgroundSessionStatus') private backgroundSessionStatus: string='后台保障未运行';
  @State private locationChanging: boolean=false;
  @StorageLink('appForeground') @Watch('updateForeground') private appForeground: boolean=false;
@@ -82,7 +86,7 @@ struct Index {
   this.settings=loadSettings(this.context.filesDir);
   try {this.applicationScope=loadVpnScope(this.context.filesDir);this.applicationScopeText=this.applicationScope.applications.join('\n');} catch(_error) {this.message='应用范围设置无法读取，请重新保存';}
   this.wifiRulesText=this.settings.bypassWifi.join('\n');
-  this.allowAutomaticConnect=true;
+  this.allowAutomaticConnect=!this.pendingShortcut;
   this.consumePendingLink();
   try {this.library=loadLibrary(this.context.filesDir);} catch(_error) {this.message='配置索引读取失败，原文件已保留';}
   this.dashboard=readDashboard(this.context.filesDir);
@@ -109,6 +113,7 @@ struct Index {
  }
  private readStatus(): void {
   if(!this.appForeground || !this.pageVisible){return;}
+  this.consumeShortcut();
   if(Date.now()-this.lastDemandWrite>=3000){try {writePrivate(`${this.context.filesDir}/ui-demand.json`,JSON.stringify({updatedAt:Date.now()}));this.lastDemandWrite=Date.now();} catch(_error) {}}
   if(Date.now()-this.lastLibraryRead>=5000){this.lastLibraryRead=Date.now();try {this.library=loadLibrary(this.context.filesDir);} catch(_error) {}this.updateReport=readUpdateReport(this.context.filesDir);}
   try {
@@ -169,15 +174,51 @@ struct Index {
   this.autoUpdateProfiles();
  }
  private selectedName(): string {return this.library.profiles.find((p: SavedProfile): boolean => p.id===this.library.selected)?.name || '尚未选择配置';}
+ private async ownVpnExists(): Promise<boolean> {
+  for(const net of await connection.getAllNets()){
+   const caps=await connection.getNetCapabilities(net);if(!caps.bearerTypes.includes(connection.NetBearType.BEARER_VPN)){continue;}
+   const properties=await connection.getConnectionProperties(net);
+   if(properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='172.19.0.1') && properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='fdfe:dcba:9876::1')){return true;}
+  }
+  return false;
+ }
+ private async consumeShortcut(): Promise<void> {
+  if(!this.pendingShortcut){return;}this.allowAutomaticConnect=false;
+  if(!this.pageVisible || !this.appForeground || this.busy || this.controlBusy || this.shortcutHandling){return;}
+  const input: string=this.pendingShortcut;this.pendingShortcut='';
+  let action: string='';
+  try {
+   const request=JSON.parse(input) as Record<string,string | number>;
+   const at: number=request.createdAt as number;
+   if(typeof request.action!=='string' || !validShortcutAction(request.action) || !Number.isFinite(at) || Date.now()-at>30000 || at>Date.now()+1000){return;}
+   action=request.action;
+  } catch(_error) {return;}
+  this.shortcutHandling=true;this.busy=true;this.activeTab=0;
+  try {
+   await runShortcutAction(action,{
+    phase:(): string => this.status.phase,
+    hasVpn:async (): Promise<boolean> => {const exists: boolean=await this.ownVpnExists();if(!this.pageVisible || !this.appForeground){throw new Error('界面已退出前台');}return exists;},
+    start:async (): Promise<void> => {await this.toggle();},
+    stop:async (): Promise<void> => {await this.disconnectVpn();},
+    reconnect:async (): Promise<void> => {await this.control('reconnect');},
+    notify:(message: string): void => {this.message=message;}
+   });
+  } catch(_error) {this.message='快捷操作未完成，请在总览中重试';}
+  finally {this.busy=false;this.shortcutHandling=false;}
+ }
+ private async disconnectVpn(): Promise<void> {
+  this.allowAutomaticConnect=false;
+  await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
+  await backgroundSession.stop();
+  this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
+  writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));this.message='已断开';
+ }
  private async toggle(automatic: boolean=false): Promise<void> {
   if(!automatic){this.allowAutomaticConnect=false;}
   this.probeGeneration++;this.probeResult='';this.probing=false;this.busy=true;
   try {
    if(this.active()){
-    await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
-    await backgroundSession.stop();
-    this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
-    writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));this.message='已断开';
+    await this.disconnectVpn();
    } else {
     if(!this.library.selected){this.activeTab=1;this.message='请先导入配置';return;}
     const content: string=readProfile(this.context.filesDir,this.library.selected);
@@ -549,9 +590,12 @@ struct Index {
     Row(){Text('指定 Wi-Fi 暂停 VPN').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.onDemand}).onChange((value: boolean) => {this.settings.onDemand=value;this.saveOptions();})}.width('100%')
     if(this.settings.onDemand){
      TextArea({text:this.wifiRulesText,placeholder:'每行一个 Wi-Fi 名称，精确匹配'}).height(100).onChange((value: string) => {this.wifiRulesText=value;})
-     Button('保存 Wi-Fi 规则').width('100%').onClick(() => {this.settings.bypassWifi=this.wifiRulesText.split(/\r?\n/).filter((name: string): boolean => name.length>0);this.saveOptions();})
+     Button('保存 Wi-Fi 规则').width('100%').onClick(() => {try {this.settings.bypassWifi=parseWifiNames(this.wifiRulesText);this.wifiRulesText=this.settings.bypassWifi.join('\n');this.saveOptions();} catch(_error) {this.message='未保存，请填写有效 Wi-Fi 名称（每行一个，最多 128 个，名称最多 32 字节）';}})
      this.note({value:'服务运行时进入这些 Wi-Fi 会暂停隧道，离开后恢复；系统结束服务后，需要重新打开 App。'})
     }
+    this.note({value:this.status.wifiConditionStatus || '连接时读取底层网络的 Wi-Fi 条件。'})
+    this.note({value:'导入配置的 wifi_ssid 和网络类型条件参与内核分流及 DNS 规则；暂停列表优先停止整个隧道。Wi-Fi 名称不可读时不沿用旧名称；暂不支持真实 BSSID 条件。'})
+    this.note({value:'桌面入口：长按 App 图标使用连接、断开或总览；添加“VPN 快捷入口”服务卡片可直接打开并执行。首次连接仍需系统授权。'})
     Row(){Text('系统后台订阅更新').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.backgroundUpdates}).onChange((value: boolean) => {this.settings.backgroundUpdates=value;this.saveOptions();this.syncUpdates();})}.width('100%')
     this.note({value:this.scheduleStatus.message})
     this.note({value:'后台由系统在有网络时择机更新，可使用蜂窝网络；更新通过校验后保存，手动重连后应用。后台检查间隔至少 2 小时，实际执行可能延后。'})
@@ -564,7 +608,7 @@ struct Index {
      ForEach(this.dashboard.modes,(mode: string) => {Button(mode).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
     }
    }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(20)
-   this.note({value:`熊盒 VPN 0.5 · ${this.coreVersion}`})
+   this.note({value:`熊盒 VPN 0.6 · ${this.coreVersion}`})
    this.note({value:'配置和日志仅保存在本机。'})
   }.padding(22).width('100%').alignItems(HorizontalAlign.Start)
  }

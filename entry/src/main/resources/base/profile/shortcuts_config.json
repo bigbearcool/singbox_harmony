@@ -1,0 +1,7 @@
+{
+ "shortcuts":[
+  {"shortcutId":"vpn-connect","label":"$string:shortcut_connect","icon":"$media:app_icon","wants":[{"bundleName":"com.bigbear.singbox","moduleName":"entry","abilityName":"EntryAbility","parameters":{"shortcutAction":"connect"}}]},
+  {"shortcutId":"vpn-disconnect","label":"$string:shortcut_disconnect","icon":"$media:app_icon","wants":[{"bundleName":"com.bigbear.singbox","moduleName":"entry","abilityName":"EntryAbility","parameters":{"shortcutAction":"disconnect"}}]},
+  {"shortcutId":"vpn-overview","label":"$string:shortcut_overview","icon":"$media:app_icon","wants":[{"bundleName":"com.bigbear.singbox","moduleName":"entry","abilityName":"EntryAbility","parameters":{"shortcutAction":"overview"}}]}
+ ]
+}

@@ -16,6 +16,8 @@ type harmonyPlatform struct {
 	tunName       string
 	netID         int32
 	mu            sync.Mutex
+	wifiMu        sync.RWMutex
+	networkState  physicalNetworkState
 	listener      libbox.InterfaceUpdateListener
 	bindSuccess   atomic.Int64
 	bindFailure   atomic.Int64
@@ -84,16 +86,20 @@ type interfaceIterator struct {
 
 func (i *interfaceIterator) HasNext() bool                  { return i.at < len(i.values) }
 func (i *interfaceIterator) Next() *libbox.NetworkInterface { v := i.values[i.at]; i.at++; return v }
-func (*harmonyPlatform) GetInterfaces() (libbox.NetworkInterfaceIterator, error) {
+func (p *harmonyPlatform) GetInterfaces() (libbox.NetworkInterfaceIterator, error) {
 	interfaces, err := nativeInterfaces()
 	if err != nil {
 		return nil, err
+	}
+	for _, it := range interfaces {
+		if it.Name == p.iface {
+			it.Type = p.networkType()
+		}
 	}
 	return &interfaceIterator{values: interfaces}, nil
 }
 func (*harmonyPlatform) UnderNetworkExtension() bool                 { return true }
 func (*harmonyPlatform) IncludeAllNetworks() bool                    { return true }
-func (*harmonyPlatform) ReadWIFIState() *libbox.WIFIState            { return &libbox.WIFIState{} }
 func (*harmonyPlatform) ClearDNSCache()                              {}
 func (*harmonyPlatform) SendNotification(*libbox.Notification) error { return nil }
 func (*harmonyPlatform) CancelNotification(string, int32) error      { return nil }
