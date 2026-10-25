@@ -14,8 +14,11 @@ function tcpProbe(ipv6: boolean,netId: number): Promise<boolean> {
   const finish=(ok: boolean): void => {
    if(finished){return;}finished=true;
    if(timer!==-1){clearTimeout(timer);}
-   client.off('message');client.off('error');
-   client.close().catch(() => {});resolve(ok);
+   // Cleanup can itself fail for a timed-out/closed native socket. Always
+   // settle the probe first so a failed target cannot leave the UI spinning.
+   resolve(ok);
+   try {client.off('message');client.off('error');} catch(_error) {}
+   try {client.close().catch(() => {});} catch(_error) {}
   };
   client.on('message',(info: socket.SocketMessageInfo) => {
    received+=util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(info.message));
@@ -36,7 +39,7 @@ function tcpProbe(ipv6: boolean,netId: number): Promise<boolean> {
  });
 }
 
-function dnsProbe(ipv6: boolean,netId: number,virtualServer: boolean=false): Promise<boolean> {
+function dnsProbe(ipv6: boolean,netId: number,virtualServer: boolean=false,expectEmpty: boolean=false): Promise<boolean> {
  return new Promise<boolean>((resolve) => {
   const client: socket.UDPSocket=socket.constructUDPSocketInstance();
   let finished: boolean=false;
@@ -45,8 +48,9 @@ function dnsProbe(ipv6: boolean,netId: number,virtualServer: boolean=false): Pro
   const finish=(ok: boolean): void => {
    if(finished){return;}finished=true;
    if(timer!==-1){clearTimeout(timer);}
-   client.off('message');client.off('error');
-   client.close().catch(() => {});resolve(ok);
+   resolve(ok);
+   try {client.off('message');client.off('error');} catch(_error) {}
+   try {client.close().catch(() => {});} catch(_error) {}
   };
   const transaction: number=ipv6?0x1211:0x1210;
   // one.one.one.one; A over IPv4 and AAAA over IPv6 to the virtual TUN DNS.
@@ -54,7 +58,8 @@ function dnsProbe(ipv6: boolean,netId: number,virtualServer: boolean=false): Pro
   client.on('message',(info: socket.SocketMessageInfo) => {
    const bytes: Uint8Array=new Uint8Array(info.message);
    if(bytes.length<12 || ((bytes[0]<<8)|bytes[1])!==transaction){return;}
-   finish((bytes[2]&0x80)!==0 && (bytes[3]&0x0f)===0 && ((bytes[6]<<8)|bytes[7])>0);
+   const answers: number=(bytes[6]<<8)|bytes[7];
+   finish((bytes[2]&0x80)!==0 && (bytes[3]&0x0f)===0 && (expectEmpty?answers===0:answers>0));
   });
   client.on('error',() => {finish(false);});
   timer=setTimeout(() => {hilog.warn(0x1700,'SingboxHarmony','dns%{public}d timeout at %{public}s',ipv6?6:4,stage);finish(false);},6000);
@@ -73,7 +78,19 @@ function dnsProbe(ipv6: boolean,netId: number,virtualServer: boolean=false): Pro
  });
 }
 
-export async function runNetworkProbes(): Promise<string> {
+interface ProbeDNSRule {query_type?: string[]; action?: string; rcode?: string; answer?: string[];}
+interface ProbeDNS {rules?: ProbeDNSRule[];}
+interface ProbeProfile {dns?: ProbeDNS;}
+function expectsEmptyAAAA(profile: string): boolean {
+ try {
+  const root: ProbeProfile=JSON.parse(profile) as ProbeProfile;
+  const rule: ProbeDNSRule | undefined=root.dns?.rules?.[0];
+  // Only recognize an unconditional first AAAA rule. Domain-specific rules do
+  // not establish the policy for the fixed diagnostic name.
+  return !!rule && Object.keys(rule).every((key: string): boolean => ['query_type','action','rcode','answer'].includes(key)) && rule.query_type?.includes('AAAA')===true && rule.action==='predefined' && rule.rcode==='NOERROR' && Array.isArray(rule.answer) && rule.answer.length===0;
+ } catch(_error) {return false;}
+}
+export async function runNetworkProbes(profile: string=''): Promise<string> {
  // The VPN app's own processes can be exempt from automatic VPN routing. Bind
  // test sockets to the actual VPN network so a successful probe proves its path.
  let vpnNetId: number=0;
@@ -87,8 +104,9 @@ export async function runNetworkProbes(): Promise<string> {
   }
  }
  if(vpnNetId===0){return '未发现可供检查的系统 VPN 网络';}
- const checked: boolean[]=await Promise.all([tcpProbe(false,vpnNetId),tcpProbe(true,vpnNetId),dnsProbe(false,vpnNetId),dnsProbe(true,vpnNetId),dnsProbe(false,vpnNetId,true),dnsProbe(true,vpnNetId,true)]);
+ const emptyAAAA: boolean=expectsEmptyAAAA(profile);
+ const checked: boolean[]=await Promise.all([tcpProbe(false,vpnNetId),tcpProbe(true,vpnNetId),dnsProbe(false,vpnNetId),dnsProbe(true,vpnNetId,false,emptyAAAA),dnsProbe(false,vpnNetId,true),dnsProbe(true,vpnNetId,true,emptyAAAA)]);
  const results: boolean[]=[checked[0],checked[1],checked[2] && checked[4],checked[3] && checked[5]];
  const labels: string[]=['IPv4 网页','IPv6 网页','IPv4 DNS A','IPv6 DNS AAAA'];
- return results.map((ok: boolean,index: number): string => `${labels[index]}：${ok?'成功':'未通过'}`).join('\n');
+ return results.map((ok: boolean,index: number): string => `${labels[index]}：${ok?(index===3 && emptyAAAA?'已接管（配置返回空 AAAA）':'成功'):'未通过'}`).join('\n');
 }

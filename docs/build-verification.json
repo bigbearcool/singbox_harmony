@@ -1,84 +1,89 @@
 {
   "date": "2026-10-25",
+  "version": "0.2.0",
   "target": "Huawei Mate XTs GRL-AL20 / HarmonyOS 7 / API 26 / arm64-v8a",
   "singBox": "1.14.3",
+  "referenceMacClient": "SFM 1.13.16 installed locally",
   "ohosGoCommit": "19667c7abfc332f848b5bd1f293e4aeb0e9991a9",
-  "baselineCommit": "e1ddba9f213215361960414e35465830433c1537",
+  "baselineCommit": "cc32bf6414fb976957abed8ab3db07120cc8dfaa",
+  "buildTags": [
+    "with_gvisor",
+    "with_quic",
+    "with_utls",
+    "with_clash_api",
+    "with_wireguard"
+  ],
   "goTests": {
-    "command": "go test -race -modfile=generated/ohos.mod -tags with_gvisor,with_quic,with_utls,with_clash_api ./...",
-    "result": "PASS"
+    "command": "go test -race -modfile=generated/ohos.mod -tags with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard ./...",
+    "result": "PASS",
+    "includes": [
+      "real daemon selector change and restore",
+      "invalid selector membership rejected",
+      "private selection state",
+      "SBStop releases daemon instance",
+      "log redaction",
+      "private configuration snapshot",
+      "userspace WireGuard profile policy"
+    ]
   },
-  "coreElf": "AArch64, PT_TLS, R_AARCH64_TLSDESC, no initial-exec TLS: PASS",
   "hapBuild": "hvigor assembleHap debug and SignHap: PASS",
-  "hapContents": "Core, N-API bridge, C++ runtime, ABI exports, portable dependency names, no desktop RPATH: PASS",
   "hapPath": "entry/build/default/outputs/default/entry-default-signed.hap",
-  "hapSha256": "173d7452985e0353017f1d32a48323ba1412e0cb206d7ba10a77517d6ef78817",
-  "hapBytes": 61689829,
+  "hapSha256": "9d6acdb0333927baf5cf61c5f45a5b1e21710608f1cab0a20db2632b7060f286",
+  "hapBytes": 62156442,
   "signed": true,
   "deviceInstalled": true,
-  "deviceCoreLoaded": true,
-  "diagnosticProfile": "direct outbound; no user proxy credentials",
-  "proxyConfigured": false,
+  "hapContents": "arm64 core, bridge, C++ runtime, SBControl ABI, portable linkage and TLSDESC: PASS",
+  "import": {
+    "inputBytes": 539427,
+    "originalBytesPreserved": true,
+    "profileLibraryMigration": true,
+    "userConfigurationSelected": true,
+    "testProfileRemoved": true,
+    "userspaceWireGuardEnabled": true,
+    "credentialsInRepository": false
+  },
   "deviceNetwork": {
     "type": "cellular",
     "physicalInterface": "rmnet0",
-    "physicalIpv6Present": true,
     "tunInterface": "vpn-tun",
-    "tunAddresses": [
-      "172.19.0.1/30",
-      "fdfe:dcba:9876::1/126"
-    ],
-    "mtu": 1280
-  },
-  "defaultRoutes": {
-    "connectionProperties": [
+    "defaultRoutes": [
       "0.0.0.0/0",
       "::/0"
     ],
-    "ipv6KernelRouteObserved": true
+    "observedSocketBindFailures": 0
   },
-  "probeMethod": "ArkTS TCP/UDP sockets explicitly bound to own VPN NetID with OH_NetConn_BindSocket",
-  "positiveProbes": {
+  "finalProbes": {
     "ipv4Http": true,
     "ipv6Http": true,
-    "ipv4UdpDnsA": true,
-    "ipv6UdpDnsAAAA": true
+    "ipv4DnsA": true,
+    "ipv6DnsInterception": true,
+    "ipv6AAAAAnswers": false,
+    "emptyAAAAIsExpectedByOriginalProfile": true,
+    "display": "IPv6 DNS AAAA：已接管（配置返回空 AAAA）",
+    "dnsTargets": "both documentation-reserved and actual virtual DNS targets checked"
   },
-  "dnsTargets": {
-    "ipv4": [
-      "192.0.2.53:53",
-      "172.19.0.2:53"
-    ],
-    "ipv6": [
-      "[2001:db8::53]:53",
-      "[fdfe:dcba:9876::2]:53"
-    ],
-    "query": "one.one.one.one",
-    "passingRowRequiresBothTargets": true
+  "profilesDeviceFlow": {
+    "remoteImport": true,
+    "invalidUpdateRollback": true,
+    "validUpdate": true,
+    "selection": true,
+    "deletion": true,
+    "originalPreserved": true
   },
-  "negativeProbe": {
-    "rule": {
-      "ip_cidr": [
-        "::/0"
-      ],
-      "action": "reject"
-    },
-    "ipv4HttpPassed": true,
-    "ipv6HttpPassed": false,
-    "ipv4DnsPassed": true,
-    "ipv6DnsPassed": true,
-    "dnsHijackPrecedesRejectRule": true
+  "nodeDeviceFlow": {
+    "selectedUpdatedOnScreen": true,
+    "originalRestoredOnScreen": true,
+    "groups": 2,
+    "uniqueMeasuredItems": 4
   },
-  "socketBindObservedFailures": 0,
-  "verificationScope": "Dual-stack default routing and core data path on cellular with direct diagnostic profile. Not a claim that all apps, protocols or proxy exits are verified.",
-  "pending": [
-    "Real user proxy profile and remote exit verification",
-    "Other applications without explicit VPN socket binding",
-    "Non-DNS UDP, QUIC and protocol matrix",
-    "Wi-Fi/cellular switching and IPv4-only underlying network",
-    "Long-duration lockscreen, battery and memory/fd stress",
-    "Full authorization denial, invalid profile and abnormal termination device matrix"
+  "nativeControlAcknowledgements": [
+    "urltest",
+    "select",
+    "restore original selection",
+    "close-all",
+    "reconnect"
   ],
+  "configurationSnapshotMode": "0600 observed on device",
   "reconnectCycles": [
     {
       "cycle": 1,
@@ -118,7 +123,41 @@
   ],
   "finalState": {
     "vpnConnected": false,
-    "profile": "built-in direct diagnostic",
-    "debugKeepAwake": false
+    "profile": "original user-provided profile",
+    "debugKeepAwake": false,
+    "temporaryHttpServerStopped": true,
+    "usbPortForwardRemoved": true
+  },
+  "pending": [
+    "Controlled server proxy exit address verification",
+    "WireGuard home endpoint handshake and home DNS service",
+    "Real Wi-Fi/cellular switching and SSID pause/resume",
+    "Long lockscreen, battery, memory and fd stress",
+    "First clipboard authorization and document export picker",
+    "Other-app traffic without explicit socket binding",
+    "System Always-On, boot launch, background wakeup, widgets, per-app rules and external remote control not provided"
+  ],
+  "baselineV01": {
+    "signedHapSha256": "173d7452985e0353017f1d32a48323ba1412e0cb206d7ba10a77517d6ef78817",
+    "positiveDirectProbes": {
+      "ipv4Http": true,
+      "ipv6Http": true,
+      "ipv4UdpDnsA": true,
+      "ipv6UdpDnsAAAA": true
+    },
+    "ipv6RejectRule": {
+      "rule": {
+        "ip_cidr": [
+          "::/0"
+        ],
+        "action": "reject"
+      },
+      "ipv4HttpPassed": true,
+      "ipv6HttpPassed": false,
+      "ipv4DnsPassed": true,
+      "ipv6DnsPassed": true,
+      "dnsHijackPrecedesRejectRule": true
+    },
+    "scope": "Previous 0.1 signed-build baseline; kept separate from the current actual-profile results."
   }
 }

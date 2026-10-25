@@ -33,7 +33,7 @@ export function readPrivate(path: string): string {
  return fs.readTextSync(path);
 }
 export function writePrivate(path: string, content: string): void {
- const tmp: string = `${path}.tmp`;
+ const tmp: string = `${path}.${util.generateRandomUUID()}.tmp`;
  const file: fs.File = fs.openSync(tmp, fs.OpenMode.CREATE | fs.OpenMode.TRUNC | fs.OpenMode.WRITE_ONLY);
  try {
   bridge.secureFile(file.fd);

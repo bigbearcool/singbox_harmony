@@ -25,9 +25,26 @@ func normalizeConfigForNetwork(input string, ipv6 bool) (string, error) {
 		return "", errors.New("配置必须包含 outbounds")
 	}
 	// Reject unsupported app-managed surfaces instead of silently accepting partial VPNs.
-	for _, field := range []string{"services", "endpoints"} {
+	for _, field := range []string{"services"} {
 		if raw, ok := cfg[field]; ok && string(raw) != "[]" && string(raw) != "null" {
 			return "", fmt.Errorf("MVP 暂不支持 %s", field)
+		}
+	}
+	// A userspace WireGuard client does not create a second system TUN/listener.
+	// Keep its peer keys, destinations and rules exactly as supplied by the user.
+	if raw, ok := cfg["endpoints"]; ok {
+		var endpoints []struct {
+			Type       string `json:"type"`
+			System     bool   `json:"system"`
+			ListenPort uint16 `json:"listen_port"`
+		}
+		if err := json.Unmarshal(raw, &endpoints); err != nil {
+			return "", errors.New("endpoints 格式无效")
+		}
+		for _, endpoint := range endpoints {
+			if endpoint.Type != "wireguard" || endpoint.System || endpoint.ListenPort != 0 {
+				return "", errors.New("当前仅支持不指定监听端口的用户态 WireGuard endpoint")
+			}
 		}
 	}
 	delete(cfg, "experimental")
@@ -103,7 +120,7 @@ func normalizeConfigForNetwork(input string, ipv6 bool) (string, error) {
 	}
 	cfg["route"], _ = json.Marshal(route)
 	// Core logs may include destinations; retain them only inside the private sandbox.
-	cfg["log"] = json.RawMessage(`{"level":"warn","timestamp":true}`)
+	cfg["log"] = json.RawMessage(`{"level":"warn","timestamp":true,"output":"/dev/null"}`)
 	result, err := json.Marshal(cfg)
 	return string(result), err
 }

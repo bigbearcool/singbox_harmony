@@ -35,6 +35,6 @@ with tempfile.TemporaryDirectory() as temporary:
             assert 'R_AARCH64_TLSDESC' in relocations, 'missing HarmonyOS TLS descriptor'
             assert 'R_AARCH64_TLS_TPREL' not in relocations, 'unsupported initial-exec TLS'
             symbols = subprocess.check_output([str(readelf), '--dyn-syms', '--wide', str(path)], text=True)
-            for symbol in ('SBVersion', 'SBFree', 'SBCheck', 'SBStart', 'SBStop', 'SBStats'):
+            for symbol in ('SBVersion', 'SBFree', 'SBCheck', 'SBStart', 'SBStop', 'SBStats', 'SBControl'):
                 assert any(line.rstrip().endswith(' ' + symbol) for line in symbols.splitlines()), f'missing {symbol}'
 print('PASS: HAP contains arm64 core, bridge and C++ runtime; ABI and portable linkage/TLS verified.')

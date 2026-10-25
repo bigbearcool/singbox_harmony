@@ -150,3 +150,27 @@ func TestIPv6NetworkKeepsExplicitDNS(t *testing.T) {
 		t.Fatal("explicit DNS was replaced")
 	}
 }
+
+func TestUserspaceWireGuardProfile(t *testing.T) {
+	endpoint := `{"type":"wireguard","tag":"home","system":false,"address":["10.7.0.2/32"],"private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","peers":[{"address":"192.0.2.1","port":51820,"public_key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","allowed_ips":["10.7.0.0/24"]}]}`
+	input := `{"outbounds":[{"type":"direct","tag":"direct"}],"endpoints":[` + endpoint + `],"route":{"final":"direct","rules":[{"ip_cidr":["10.7.0.0/24"],"outbound":"home"}]}}`
+	text, err := normalizeConfig(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, endpoint) || !strings.Contains(text, `"outbound":"home"`) {
+		t.Fatal("WireGuard endpoint or its route was changed")
+	}
+	if err = libbox.CheckConfig(text); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		strings.Replace(input, `"system":false`, `"system":true`, 1),
+		strings.Replace(input, `"system":false`, `"listen_port":51820`, 1),
+		strings.Replace(input, `"type":"wireguard"`, `"type":"tailscale"`, 1),
+	} {
+		if _, err := normalizeConfig(bad); err == nil {
+			t.Fatal("accepted a system endpoint or a listening endpoint")
+		}
+	}
+}

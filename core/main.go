@@ -70,6 +70,11 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName 
 		return result(err, "")
 	}
 	path := C.GoString(workPath)
+	if err = privateSnapshot(path); err != nil {
+		return result(fmt.Errorf("无法保护私有配置快照"), "")
+	}
+	normalized = runtimeSettings(normalized, path)
+	activeLogRedactions = logRedactions(C.GoString(config))
 	if err = libbox.Setup(&libbox.SetupOptions{BasePath: path, WorkingPath: path, TempPath: path, LogMaxLines: 100, OomKillerDisabled: true}); err != nil {
 		return result(err, "")
 	}
@@ -90,6 +95,7 @@ func SBStart(config *C.char, fd C.int, workPath *C.char, iface *C.char, tunName 
 		return result(err, "")
 	}
 	running = server
+	restoreSelections(C.GoString(config), path)
 	activePlatform = platform
 	return result(nil, "双栈 TUN 与 sing-box 内核已启动")
 }
@@ -99,6 +105,9 @@ func SBStop() *C.char {
 	lifecycle.Lock()
 	defer lifecycle.Unlock()
 	if running != nil {
+		// Closing CommandServer only stops control subscriptions; the daemon's
+		// active service must be closed explicitly to release TUN and sockets.
+		_ = running.CloseService()
 		running.Close()
 		running = nil
 		activePlatform = nil
@@ -152,6 +161,11 @@ func SBStats() *C.char {
 	}
 	data, _ := json.Marshal(stats)
 	return C.CString(string(data))
+}
+
+//export SBControl
+func SBControl(request *C.char) *C.char {
+	return C.CString(coreControl(C.GoString(request)))
 }
 
 type commandHandler struct{}

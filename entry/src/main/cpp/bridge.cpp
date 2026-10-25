@@ -18,10 +18,11 @@ char *SBCheck(char *);
 char *SBStart(char *, int, char *, char *, char *, int);
 char *SBStop();
 char *SBStats();
+char *SBControl(char *);
 void SBFree(char *);
 }
 
-enum class Operation { Version, Check, Start, Stop, Stats };
+enum class Operation { Version, Check, Start, Stop, Stats, Control };
 struct Job {
  napi_async_work work = nullptr;
  napi_deferred deferred = nullptr;
@@ -53,6 +54,7 @@ static void Execute(napi_env, void *data) {
  case Operation::Start: value=SBStart(job->config.data(),job->fd,job->path.data(),job->interfaceName.data(),job->tunName.data(),job->netId);break;
  case Operation::Stop: value=SBStop();break;
  case Operation::Stats: value=SBStats();break;
+ case Operation::Control: value=SBControl(job->config.data());break;
  }
  if(value){job->output=value;SBFree(value);}
  else job->output="{\"ok\":false,\"message\":\"内核未返回结果\"}";
@@ -67,7 +69,7 @@ static napi_value Dispatch(napi_env env,napi_callback_info info,Operation operat
  size_t argc=6;napi_value argv[6];napi_get_cb_info(env,info,&argc,argv,nullptr,nullptr);
  auto job=std::make_unique<Job>();job->operation=operation;
  bool valid=true;
- if(operation==Operation::Check || operation==Operation::Start) valid=argc>=1 && StringArg(env,argv[0],job->config);
+ if(operation==Operation::Check || operation==Operation::Start || operation==Operation::Control) valid=argc>=1 && StringArg(env,argv[0],job->config);
  if(operation==Operation::Start) valid=valid && argc==6 && napi_get_value_int32(env,argv[1],&job->fd)==napi_ok && job->fd>=0 && StringArg(env,argv[2],job->path) && StringArg(env,argv[3],job->interfaceName) && StringArg(env,argv[4],job->tunName) && !job->tunName.empty() && napi_get_value_int32(env,argv[5],&job->netId)==napi_ok && job->netId>0;
  if(!valid){napi_throw_type_error(env,nullptr,"无效的原生参数，配置上限 1 MiB");return nullptr;}
  napi_value promise;
@@ -81,6 +83,7 @@ static napi_value Check(napi_env e,napi_callback_info i){return Dispatch(e,i,Ope
 static napi_value Start(napi_env e,napi_callback_info i){return Dispatch(e,i,Operation::Start);}
 static napi_value Stop(napi_env e,napi_callback_info i){return Dispatch(e,i,Operation::Stop);}
 static napi_value Stats(napi_env e,napi_callback_info i){return Dispatch(e,i,Operation::Stats);}
+static napi_value Control(napi_env e,napi_callback_info i){return Dispatch(e,i,Operation::Control);}
 static napi_value TunName(napi_env env,napi_callback_info info){
  size_t argc=1;napi_value argv[1];int fd=-1;
  napi_get_cb_info(env,info,&argc,argv,nullptr,nullptr);
@@ -149,6 +152,7 @@ static napi_value Init(napi_env env,napi_value exports){
   {"start",nullptr,Start,nullptr,nullptr,nullptr,napi_default,nullptr},
   {"stop",nullptr,Stop,nullptr,nullptr,nullptr,napi_default,nullptr},
   {"stats",nullptr,Stats,nullptr,nullptr,nullptr,napi_default,nullptr},
+  {"control",nullptr,Control,nullptr,nullptr,nullptr,napi_default,nullptr},
   {"tunName",nullptr,TunName,nullptr,nullptr,nullptr,napi_default,nullptr},
   {"interfaces",nullptr,Interfaces,nullptr,nullptr,nullptr,napi_default,nullptr},
   {"secureFile",nullptr,SecureFile,nullptr,nullptr,nullptr,napi_default,nullptr},
