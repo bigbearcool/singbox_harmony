@@ -1,20 +1,25 @@
 {
   "date": "2026-10-25",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "baselineCommit": "0841aacfc2014e867db9181bfc34ebcc4ef20725",
-  "status": "offline signed candidate; awaiting Mate XTs device acceptance",
-  "deviceInstalled": false,
-  "installedVersion": "0.5.6",
-  "hapPath": ".deps/releases/0.6.0/entry-default-signed.hap",
-  "hapSha256": "92f4af0a1d59d3eb8cb566f6f4e3a6fed1ac6940603d20372e7def4901302c80",
-  "hapBytes": 62423276,
+  "status": "installed; cellular and desktop card acceptance passed; Wi-Fi deferred by user",
+  "deviceInstalled": true,
+  "installedVersion": "0.6.1",
+  "hapPath": ".deps/releases/0.6.1/entry-default-signed.hap",
+  "hapSha256": "c8e3f7836210e346d9fee288bd9328c2e6c6413c054cdf65c203096ead5d5911",
+  "hapBytes": 62421658,
   "packagedCoreSha256": "080e47a65f531a44962780ec0481ea0bd827d8d7ec1642013a44c7e31a98f594",
   "checks": {
     "goRace": "PASS: actual daemon initial Wi-Fi state, network type, live changes and clearing; concurrency, full core regression",
     "ets": "PASS: 12 actual-source test modules; final shortcut and VPN lifecycle tests rerun after message changes; SDK substituted, no device emulator",
     "hvigor": "PASS: assembleHap and SignHap",
     "packaging": "PASS: CRC, current core after exact SDK strip transform, arm64/TLSDESC/linkage, singleton EntryAbility, 3 shortcut Wants, 2x2 form configuration and widgets.abc",
-    "signature": "PASS: official SDK verify-app success, digest true and permission signature valid"
+    "signature": "PASS: official verify-app for 0.6.1, digest and permission signature verified",
+    "cellularDevice": "PASS: normal cold start, IPv4/IPv6 HTTP, IPv4 DNS, configured empty AAAA and encrypted WireGuard home DNS reply",
+    "desktopCard": "PASS: system search discovery, 2x2 actual desktop placement, readable labels after padding fix, connect/disconnect/repeat/overview and cold connect",
+    "launcher": "PASS: actual long-press menu shows all 3 entries; connect/disconnect tapped successfully; overview via Want verified, actual overview-menu tap not completed",
+    "dataPreservation": "PASS: original selected; original and runtime alias byte-identical; settings preserved; no test profile added",
+    "screenPolicy": "PASS: final normal cold card launch without diagnosticsKeepAwake"
   },
   "implemented": [
     "Physical SSID and Wi-Fi/cellular type supplied at native startup",
@@ -31,12 +36,15 @@
     "Card is a quick entry; no cached VPN status or secrets exposed to launcher"
   ],
   "pending": [
-    "Install 0.6.0 and repeat dual-stack/WireGuard regression; native startup ABI changed",
-    "Actual Wi-Fi SSID reads and Wi-Fi/cellular switches on Mate XTs",
-    "Imported SSID and network-type route/DNS rules using controlled device fixture",
-    "Pause/resume, temporary unreadable Wi-Fi and manual disconnect behavior",
-    "Launcher long-press shortcuts, add/remove card, cold/warm/repeated action and first authorization",
+    "Actual Wi-Fi SSID reads, route/DNS matching, pause/resume and Wi-Fi/cellular switches: explicitly deferred by user",
+    "Actual launcher overview menu tap and card remove/re-add acceptance",
     "Earlier unplugged residency, natural subscription wakeup, app-scope and peripheral UI tests remain pending"
   ],
-  "signed": true
+  "signed": true,
+  "initialCandidate": {
+    "version": "0.6.0",
+    "hapPath": ".deps/releases/0.6.0/entry-default-signed.hap",
+    "hapSha256": "92f4af0a1d59d3eb8cb566f6f4e3a6fed1ac6940603d20372e7def4901302c80",
+    "hapBytes": 62423276
+  }
 }
