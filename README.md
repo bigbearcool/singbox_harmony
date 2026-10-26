@@ -10,6 +10,11 @@
 
 > 这是一个业余项目，由作者在一个周末内完成开发并通过真机验收，开发过程记录在作者的公众号文章里。它解决的是一个具体问题：**在鸿蒙上拥有一个功能完整、支持 IPv6 全接管的 own-network 客户端**——远程连回家庭 / 公司网络（WireGuard）、按规则分流自建节点的流量。
 
+<div align="center">
+  <img src="docs/assets/gzh-qrcode.jpg" alt="微信公众号「哎哟酷熊」二维码" width="180">
+  <p><sub>扫码关注公众号「哎哟酷熊」，看这个项目和一个普通人是怎么用 AI 做出来的</sub></p>
+</div>
+
 ---
 
 ## 功能特性
@@ -192,3 +197,10 @@ sing-box 内核来自 [SagerNet/sing-box v1.14.3](https://github.com/SagerNet/si
 ## 用途声明
 
 本项目用于连接**你自己拥有和管理**的网络（家庭、公司自建服务），请遵守所在地区法律法规。工具是中性的，别拿它干不合适的事。
+
+---
+
+<div align="center">
+  <img src="docs/assets/gzh-qrcode.jpg" alt="微信公众号「哎哟酷熊」二维码" width="180">
+  <p><sub>觉得项目有用？扫码关注公众号「哎哟酷熊」——AI 落地、鸿蒙折腾、周末造轮子的真实记录</sub></p>
+</div>
