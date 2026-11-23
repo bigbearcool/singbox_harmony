@@ -25,25 +25,28 @@ func privateSnapshot(dir string) error {
 }
 
 func runtimeSettings(config, dir string) string {
+	result := config
 	var settings struct {
 		LogLevel string `json:"logLevel"`
 	}
-	bytes, err := os.ReadFile(filepath.Join(dir, "settings.json"))
-	if err != nil || len(bytes) > 4096 || json.Unmarshal(bytes, &settings) != nil {
-		return config
+	if bytes, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil && len(bytes) <= 4096 && json.Unmarshal(bytes, &settings) == nil {
+		switch settings.LogLevel {
+		case "debug", "info", "warn", "error":
+			var root map[string]json.RawMessage
+			if json.Unmarshal([]byte(result), &root) == nil && root != nil {
+				root["log"], _ = json.Marshal(map[string]any{"level": settings.LogLevel, "timestamp": true, "output": "/dev/null"})
+				if marshaled, err := json.Marshal(root); err == nil {
+					result = string(marshaled)
+				}
+			}
+		}
 	}
-	switch settings.LogLevel {
-	case "debug", "info", "warn", "error":
-	default:
-		return config
+	if overrides := loadLocalOverrides(dir); overrides.Enabled {
+		if applied, err := applyLocalOverrides(result, overrides); err == nil {
+			result = applied
+		}
 	}
-	var root map[string]json.RawMessage
-	if json.Unmarshal([]byte(config), &root) != nil {
-		return config
-	}
-	root["log"], _ = json.Marshal(map[string]any{"level": settings.LogLevel, "timestamp": true, "output": "/dev/null"})
-	result, _ := json.Marshal(root)
-	return string(result)
+	return result
 }
 func loadSelections() map[string]string {
 	values := map[string]string{}
