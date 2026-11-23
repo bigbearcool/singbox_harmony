@@ -39,6 +39,10 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private readonly handoverDebouncer: HandoverDebouncer = new HandoverDebouncer(450);
  private readonly clockJump: ClockJumpDetector = new ClockJumpDetector();
  private readonly selfHeal: SelfHealTracker = new SelfHealTracker();
+ private udsServerFd: number = -1;
+ private udsTimer: number = -1;
+ private udsTimerMs: number = 0;
+ private processingUds: boolean = false;
 
  private uiActive(): boolean {
   try {
@@ -110,6 +114,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   this.destroyed = true;
   this.handoverDebouncer.cancel();
   if (this.networkTimer !== -1) { clearInterval(this.networkTimer); this.networkTimer = -1; }
+  this.stopUdsServer();
   // Queue shutdown after any startup in flight, so a late start cannot resurrect the VPN.
   this.task = this.task.then(async () => {
    await this.cleanup();
@@ -296,6 +301,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    await this.applySsidPolicy();
    this.requireAlive();
    this.registerNetConnection();
+   this.startUdsServer();
    this.publish('running', SingboxVpnAbility.RUNNING_MESSAGE);
    this.networkTimer = setInterval(() => { this.tick(); }, 1000);
   } catch (_error) {
@@ -351,6 +357,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   this.checkingNetwork = true;
   try {
    if (this.blackholeSince > 0 && this.conn !== undefined) {
+    this.syncUdsTimer();
+    if (await this.processUdsControl()) { return; }
     if (await this.processControl()) { return; }
     await this.inspectBlackholeRecovery();
     return;
@@ -361,6 +369,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
     if (this.bypassCurrentWifi) { this.publish('paused', this.status.message); } else { await this.startVpn(); }
     return;
    }
+   this.syncUdsTimer();
+   if (await this.processUdsControl()) { return; }
    if (await this.processControl()) { return; }
    const intervalMs: number = this.inspectIntervalMs();
    const nowMs: number = Date.now();
@@ -445,12 +455,121 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    await this.stopSelf();
   }
  }
- private async processControl(): Promise<boolean> {
-  let request: ControlRequest;
-  try { request = JSON.parse(readPrivate(`${this.context.filesDir}/control-request.json`)) as ControlRequest; } catch (_error) { return false; }
-  if (!request.id || request.id === this.lastControlId) { return false; }
+ private udsSocketPath(): string {
+  return `${this.context.filesDir}/control.sock`;
+ }
+ private startUdsServer(): void {
+  if (this.udsServerFd >= 0 || this.destroyed) { return; }
+  try {
+   if (typeof bridge.udsListen === 'function') {
+    this.udsServerFd = bridge.udsListen(this.udsSocketPath());
+   }
+  } catch (_error) {
+   this.udsServerFd = -1;
+  }
+  if (this.udsServerFd >= 0) {
+   this.syncUdsTimer();
+  }
+ }
+ private syncUdsTimer(): void {
+  if (this.destroyed || this.udsServerFd < 0) {
+   if (this.udsTimer !== -1) {
+    clearInterval(this.udsTimer);
+    this.udsTimer = -1;
+    this.udsTimerMs = 0;
+   }
+   return;
+  }
+  const desiredMs: number = this.uiActive() ? 120 : 600;
+  if (this.udsTimer !== -1 && this.udsTimerMs === desiredMs) { return; }
+  if (this.udsTimer !== -1) {
+   clearInterval(this.udsTimer);
+   this.udsTimer = -1;
+  }
+  this.udsTimerMs = desiredMs;
+  this.udsTimer = setInterval(() => { this.pollUds(); }, desiredMs);
+ }
+ private stopUdsServer(): void {
+  if (this.udsTimer !== -1) {
+   clearInterval(this.udsTimer);
+   this.udsTimer = -1;
+   this.udsTimerMs = 0;
+  }
+  if (this.udsServerFd >= 0) {
+   const fd: number = this.udsServerFd;
+   this.udsServerFd = -1;
+   try {
+    if (typeof bridge.udsClose === 'function') {
+     bridge.udsClose(fd, this.udsSocketPath());
+    }
+   } catch (_error) {}
+  }
+ }
+ private pollUds(): void {
+  if (this.destroyed || this.udsServerFd < 0 || this.processingUds || typeof bridge.udsAcceptRead !== 'function') { return; }
+  let raw: string = '';
+  try { raw = bridge.udsAcceptRead(this.udsServerFd); } catch (_error) { return; }
+  if (!raw || raw.length === 0) { return; }
+  this.processingUds = true;
+  this.task = this.task.catch(() => {}).then(async () => {
+   try {
+    await this.handleUdsPayload(raw);
+    await this.drainUdsControl();
+   } finally {
+    this.processingUds = false;
+   }
+  });
+ }
+ private async processUdsControl(): Promise<boolean> {
+  if (this.destroyed || this.udsServerFd < 0 || this.processingUds || typeof bridge.udsAcceptRead !== 'function') { return false; }
+  this.processingUds = true;
+  try {
+   return await this.drainUdsControl();
+  } finally {
+   this.processingUds = false;
+  }
+ }
+ private async drainUdsControl(): Promise<boolean> {
+  let reconnected: boolean = false;
+  for (let i: number = 0; i < 4; i++) {
+   if (this.destroyed || this.udsServerFd < 0 || typeof bridge.udsAcceptRead !== 'function') { break; }
+   let raw: string = '';
+   try { raw = bridge.udsAcceptRead(this.udsServerFd); } catch (_error) { break; }
+   if (!raw || raw.length === 0) { break; }
+   if (await this.handleUdsPayload(raw)) {
+    reconnected = true;
+    break;
+   }
+  }
+  return reconnected;
+ }
+ private async handleUdsPayload(raw: string): Promise<boolean> {
+  let envelope: UdsEnvelope;
+  try { envelope = JSON.parse(raw) as UdsEnvelope; } catch (_error) { return false; }
+  if (typeof envelope.fd !== 'number' || envelope.fd < 0) { return false; }
+  let request: ControlRequest | undefined;
+  try { request = JSON.parse(envelope.payload) as ControlRequest; } catch (_error) { request = undefined; }
+  if (!request || !request.id || (typeof request.createdAt === 'number' && (Date.now() - request.createdAt > 6000 || request.createdAt > Date.now() + 1000))) {
+   const invalid: ControlResult = { id: request?.id || '', ok: false, message: '无效的控制请求' };
+   try { if (typeof bridge.udsWriteClose === 'function') { bridge.udsWriteClose(envelope.fd, JSON.stringify(invalid)); } } catch (_error) {}
+   return false;
+  }
   this.lastControlId = request.id;
-  if (Date.now() - request.createdAt > 6000 || request.createdAt > Date.now() + 1000) { return false; }
+  let result: ControlResult;
+  try {
+   result = await this.executeControlRequest(request);
+  } catch (error) {
+   const message: string = error instanceof Error ? error.message : '控制请求执行失败';
+   result = { id: request.id, ok: false, message: message };
+  }
+  try {
+   if (typeof bridge.udsWriteClose === 'function') {
+    bridge.udsWriteClose(envelope.fd, JSON.stringify(result));
+   }
+  } catch (_error) {}
+  return request.action === 'reconnect';
+ }
+ private async executeControlRequest(request: ControlRequest): Promise<ControlResult> {
   let reply: ControlReply;
   if (request.action === 'ping') {
    if (this.status.phase === 'running') {
@@ -467,18 +586,30 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    if (!this.destroyed) { this.publish(this.status.phase, this.status.message, true); }
    reply = { ok: true, message: 'ok' };
   } else if (request.action === 'reconnect') {
-   await this.cleanup(); if (this.destroyed) { return true; }
+   await this.cleanup();
+   if (this.destroyed) { return { id: request.id, ok: false, message: 'VPN 已停止' }; }
    await this.startVpn();
    reply = { ok: this.status.phase === 'running', message: this.status.phase === 'running' ? '已重新连接' : '正在等待网络恢复' };
   } else {
    const nativeRequest: NativeControlRequest = { action: request.action, group: request.group || '', outbound: request.outbound || '', id: request.connectionId || '', mode: request.mode || '', host: request.host || '' };
    reply = JSON.parse(await bridge.control(JSON.stringify(nativeRequest))) as ControlReply;
   }
-  if (this.destroyed) { return true; }
   const result: ControlResult = { id: request.id, ok: reply.ok, message: reply.message };
   if (reply.diagnosis) { result.diagnosis = reply.diagnosis; }
-  writePrivate(`${this.context.filesDir}/control-result.json`, JSON.stringify(result));
+  if (reply.deepProbe) { result.deepProbe = reply.deepProbe; }
+  if (reply.converted !== undefined) { result.converted = reply.converted; }
   this.lastSnapshotAt = 0;
+  return result;
+ }
+ private async processControl(): Promise<boolean> {
+  let request: ControlRequest;
+  try { request = JSON.parse(readPrivate(`${this.context.filesDir}/control-request.json`)) as ControlRequest; } catch (_error) { return false; }
+  if (!request.id || request.id === this.lastControlId) { return false; }
+  this.lastControlId = request.id;
+  if (Date.now() - request.createdAt > 6000 || request.createdAt > Date.now() + 1000) { return false; }
+  const result: ControlResult = await this.executeControlRequest(request);
+  if (this.destroyed) { return true; }
+  writePrivate(`${this.context.filesDir}/control-result.json`, JSON.stringify(result));
   return request.action === 'reconnect';
  }
  private async snapshotDashboard(): Promise<void> {
@@ -499,6 +630,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   this.blackholeSince = 0;
   this.lastAppliedSsidPolicy = '';
   this.unregisterNetConnection();
+  this.stopUdsServer();
   if (this.networkTimer !== -1) { clearInterval(this.networkTimer); this.networkTimer = -1; }
   try { await bridge.stop(); } catch (_error) {}
   if (this.conn) { try { await this.conn.destroy(); } catch (_error) {} this.conn = undefined; }
@@ -510,3 +642,4 @@ interface ModeControlRequest { action: string; mode: string; }
 interface SelectControlRequest { action: string; group: string; outbound: string; }
 interface UpdatePhysicalNetRequest { action: string; interfaceName: string; netId: number; network: PhysicalNetworkState; }
 interface DashboardDemand { updatedAt: number; }
+interface UdsEnvelope { fd: number; payload: string; }
