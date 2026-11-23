@@ -54,6 +54,42 @@ try {
  const current=api.loadLibrary(root);locks.add(path.join(root,'profiles.lock'));
  assert.throws(()=>api.selectProfile(root,current,first));locks.delete(path.join(root,'profiles.lock'));
  assert.equal(api.loadLibrary(root).selected,third);
+ // Subscription-Userinfo parsing
+ assert.deepEqual(api.parseSubscriptionUserinfo('upload=123; download=456; total=789; expire=1790000000'),{upload:123,download:456,total:789,expire:1790000000});
+ assert.deepEqual(api.parseSubscriptionUserinfo('UPLOAD=10; Download=20; TOTAL=100; Expire=1790000001'),{upload:10,download:20,total:100,expire:1790000001});
+ assert.deepEqual(api.parseSubscriptionUserinfo('upload=-5; download=abc; total=500; expire=1790000002'),{upload:0,download:0,total:500,expire:1790000002});
+ assert.deepEqual(api.parseSubscriptionUserinfo('total=2048'),{upload:0,download:0,total:2048,expire:0});
+ assert.equal(api.parseSubscriptionUserinfo(''),undefined);
+ assert.equal(api.parseSubscriptionUserinfo('upload=-1; download=NaN; foo=bar'),undefined);
+ // fetchProfileWithMeta & backward-compatible fetchProfile
+ network=async()=>({responseCode:200,result:config('meta-ok'),header:{'Subscription-Userinfo':'upload=100; download=200; total=1000; expire=1790000100'}});
+ const fetched=await api.fetchProfileWithMeta('https://example.invalid/sub');
+ assert.equal(fetched.content,config('meta-ok'));
+ assert.deepEqual(fetched.userinfo,{upload:100,download:200,total:1000,expire:1790000100});
+ assert.equal(await api.fetchProfile('https://example.invalid/sub'),config('meta-ok'));
+ network=async()=>({responseCode:200,result:config('no-header'),header:{}});
+ const fetchedNoHeader=await api.fetchProfileWithMeta('https://example.invalid/sub');
+ assert.equal(fetchedNoHeader.content,config('no-header'));
+ assert.equal(fetchedNoHeader.userinfo,undefined);
+ // addProfile + refreshProfile userinfo persistence
+ const initialUserinfo={upload:11,download:22,total:333,expire:1790000200};
+ lib=await api.addProfile(root,api.loadLibrary(root),'sub-1',config('sub-v1'),'https://example.invalid/sub',initialUserinfo);
+ const fourth=lib.selected;
+ assert.deepEqual(api.loadLibrary(root).profiles.find(p=>p.id===fourth).userinfo,initialUserinfo);
+ network=async()=>({responseCode:200,result:config('sub-v2'),header:{'subscription-userinfo':'upload=55; download=66; total=999; expire=1790000300'}});
+ await api.refreshProfile(root,lib,fourth);
+ assert.deepEqual(api.loadLibrary(root).profiles.find(p=>p.id===fourth).userinfo,{upload:55,download:66,total:999,expire:1790000300});
+ // renameProfile validation, lock, and persistence
+ lib=api.renameProfile(root,api.loadLibrary(root),fourth,'  主力机场  ');
+ assert.equal(api.loadLibrary(root).profiles.find(p=>p.id===fourth).name,'主力机场');
+ assert.deepEqual(api.loadLibrary(root).profiles.find(p=>p.id===fourth).userinfo,{upload:55,download:66,total:999,expire:1790000300});
+ assert.throws(()=>api.renameProfile(root,lib,fourth,'   '));
+ assert.throws(()=>api.renameProfile(root,lib,fourth,'a'.repeat(81)));
+ assert.throws(()=>api.renameProfile(root,lib,'nonexistent-id','valid'));
+ locks.add(path.join(root,'profiles.lock'));
+ assert.throws(()=>api.renameProfile(root,lib,fourth,'blocked-by-lock'));
+ locks.delete(path.join(root,'profiles.lock'));
+ assert.equal(api.loadLibrary(root).profiles.find(p=>p.id===fourth).name,'主力机场');
  fs.writeFileSync(path.join(root,'profiles.json'),'{broken');assert.throws(()=>api.loadLibrary(root));assert.equal(fs.readFileSync(path.join(root,'profiles.json'),'utf8'),'{broken');
- console.log('PASS: legacy migration, immutable revisions, invalid update rollback, selection preservation, delete/edit during download, lock contention, corrupt index preservation.');
+ console.log('PASS: legacy migration, immutable revisions, invalid update rollback, selection preservation, delete/edit during download, lock contention, corrupt index preservation, userinfo parsing/persistence, and renameProfile.');
 } finally {fs.rmSync(root,{recursive:true,force:true});delete globalThis.__profileEnv}

@@ -28,8 +28,15 @@ export class WindowLayout {
    AppStorage.setOrCreate('windowSafeTop',top);AppStorage.setOrCreate('windowSafeBottom',bottom);
    AppStorage.setOrCreate('windowSafeLeft',left);AppStorage.setOrCreate('windowSafeRight',right);
    const rect=main.getWindowProperties().windowRect;
+   const rawWidthVp: number=rect && Number.isFinite(rect.width) && rect.width>0?ui.px2vp(rect.width):0;
+   const widthVp: number=Number.isFinite(rawWidthVp) && rawWidthVp>0?rawWidthVp:0;
+   AppStorage.setOrCreate('windowWidthVp',widthVp);
+   AppStorage.setOrCreate('windowIsWide',widthVp>=840);
    try {writePrivate(`${this.dir}/window-layout.json`,JSON.stringify({updatedAt:Date.now(),width:rect.width,height:rect.height,top:top,bottom:bottom,left:left,right:right}));} catch(_error) {}
-  } catch(_error) {}
+  } catch(_error) {
+   AppStorage.setOrCreate('windowWidthVp',0);
+   AppStorage.setOrCreate('windowIsWide',false);
+  }
   AppStorage.setOrCreate('windowLayoutReady',true);
  }
  stop(): void {

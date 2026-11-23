@@ -10,8 +10,11 @@ globalThis.__layoutEnv={window:{AvoidAreaType:{TYPE_SYSTEM:0,TYPE_NAVIGATION_IND
 const source=fs.readFileSync(new URL('../entry/src/main/ets/common/WindowLayout.ets',import.meta.url),'utf8').replace(/^import .*;\n/gm,'');
 const {WindowLayout}=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes('const {window,writePrivate}=globalThis.__layoutEnv;\n'+source,{mode:'strip'})).toString('base64'));
 try {
- const layout=new WindowLayout();layout.bind(main,'/test');assert.equal(values.get('windowSafeTop'),32);assert.equal(values.get('windowSafeBottom'),80/3);assert(values.get('windowLayoutReady'));assert.equal(events.size,2);
- rect={width:2232,height:2000};system=area(120,90);cutout=area(0,0,42,12);events.get('windowSizeChange')(rect);assert.equal(values.get('windowSafeTop'),40);assert.equal(values.get('windowSafeBottom'),30);assert.equal(values.get('windowSafeLeft'),14);assert.equal(values.get('windowSafeRight'),4);assert.equal(writes.at(-1).width,2232);
+ const layout=new WindowLayout();layout.bind(main,'/test');assert.equal(values.get('windowSafeTop'),32);assert.equal(values.get('windowSafeBottom'),80/3);assert.equal(values.get('windowWidthVp'),1008/3);assert.equal(values.get('windowIsWide'),false);assert(values.get('windowLayoutReady'));assert.equal(events.size,2);
+ rect={width:2232,height:2000};system=area(120,90);cutout=area(0,0,42,12);events.get('windowSizeChange')(rect);assert.equal(values.get('windowSafeTop'),40);assert.equal(values.get('windowSafeBottom'),30);assert.equal(values.get('windowSafeLeft'),14);assert.equal(values.get('windowSafeRight'),4);assert.equal(values.get('windowWidthVp'),2232/3);assert.equal(values.get('windowIsWide'),false);assert.equal(writes.at(-1).width,2232);
+ rect={width:3184,height:2232};events.get('windowSizeChange')(rect);assert.equal(values.get('windowWidthVp'),3184/3);assert.equal(values.get('windowIsWide'),true);assert.equal(writes.at(-1).width,3184);
  indicator=area(0,120);events.get('avoidAreaChange')({});assert.equal(values.get('windowSafeBottom'),40);layout.stop();assert.equal(events.size,0);
- console.log('PASS: system/status/gesture/cutout insets, density conversion, fold/resize changes, callback-scoped cleanup.');
+ const brokenMain={on:(name,callback)=>events.set(name,callback),off:(name)=>events.delete(name),getUIContext:()=>{throw new Error('unavailable');},getWindowAvoidArea:()=>area(),getWindowProperties:()=>({windowRect:{width:0,height:0}})};
+ layout.bind(brokenMain,'/test');assert.equal(values.get('windowWidthVp'),0);assert.equal(values.get('windowIsWide'),false);layout.stop();
+ console.log('PASS: system/status/gesture/cutout insets, density conversion, fold/resize changes, Mate XTs wide-screen detection, safe fallback, callback-scoped cleanup.');
 } finally {delete globalThis.AppStorage;delete globalThis.__layoutEnv}

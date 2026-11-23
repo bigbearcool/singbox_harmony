@@ -12,5 +12,26 @@ try {
  assert.throws(()=>api.saveVpnScope('/test','include',''));assert.equal(api.loadVpnScope('/test').mode,'include','invalid edits must not replace a saved scope');
  assert.throws(()=>api.validateVpnScope('include',Array.from({length:257},(_,i)=>'com.example.app'+i)));assert.throws(()=>api.validateVpnScope('include',['../../escape']));
  data.set('/test/vpn-scope.json','{invalid');assert.throws(()=>api.loadVpnScope('/test'),'corrupt scope cannot silently enable all-app routing');
- console.log('PASS: default all-app capture, exclusive include/exclude lists, deduplication, limits, invalid rollback and corrupt-scope preservation.');
+ // APP_SCOPE_PRESETS validation
+ assert.equal(api.APP_SCOPE_PRESETS.length,3);
+ assert.deepEqual(api.APP_SCOPE_PRESETS.map(c=>c.title),['金融支付','国内社交与出行','国内影音与购物']);
+ const allPresetBundles=api.APP_SCOPE_PRESETS.flatMap(c=>c.items.map(i=>i.bundleName));
+ assert.equal(allPresetBundles.length,12);
+ assert(allPresetBundles.includes('com.alipay.mobile.client'));
+ assert(allPresetBundles.includes('com.tencent.wechat'));
+ assert(allPresetBundles.includes('yylx.danmaku.bili'));
+ const validatedPresets=api.validateVpnScope('exclude',allPresetBundles);
+ assert.equal(validatedPresets.applications.length,12);
+ // toggleScopePackage immutability and add/remove behavior
+ const baseScope={mode:'exclude',applications:['com.tencent.wechat']};
+ const added=api.toggleScopePackage(baseScope,'com.alipay.mobile.client');
+ assert.deepEqual(baseScope.applications,['com.tencent.wechat'],'input scope must not be mutated');
+ assert.deepEqual(added,{mode:'exclude',applications:['com.tencent.wechat','com.alipay.mobile.client']});
+ const removed=api.toggleScopePackage(added,'com.tencent.wechat');
+ assert.deepEqual(added.applications,['com.tencent.wechat','com.alipay.mobile.client'],'previous scope must not be mutated');
+ assert.deepEqual(removed,{mode:'exclude',applications:['com.alipay.mobile.client']});
+ const unchanged=api.toggleScopePackage(removed,'   ');
+ assert.deepEqual(unchanged,{mode:'exclude',applications:['com.alipay.mobile.client']});
+ assert.notEqual(unchanged,removed);
+ console.log('PASS: default all-app capture, exclusive include/exclude lists, deduplication, limits, invalid rollback, corrupt-scope preservation, APP_SCOPE_PRESETS, and toggleScopePackage.');
 } finally {delete globalThis.__scopeEnv}

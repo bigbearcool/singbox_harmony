@@ -3,6 +3,45 @@ import { vpnExtension } from '@kit.NetworkKit';
 import { readPrivate, writePrivate } from './Store';
 
 export interface VpnScope {mode: string; applications: string[];}
+export interface AppPresetItem {label: string; bundleName: string;}
+export interface AppPresetCategory {title: string; items: AppPresetItem[];}
+export const APP_SCOPE_PRESETS: AppPresetCategory[]=[
+ {
+  title:'金融支付',
+  items:[
+   {label:'支付宝',bundleName:'com.alipay.mobile.client'},
+   {label:'云闪付',bundleName:'com.unionpay.hmos.wallet'},
+   {label:'招商银行',bundleName:'com.cmbchina.harmony'},
+   {label:'工商银行',bundleName:'com.icbc.harmonyclient'}
+  ]
+ },
+ {
+  title:'国内社交与出行',
+  items:[
+   {label:'微信',bundleName:'com.tencent.wechat'},
+   {label:'高德地图',bundleName:'com.amap.hmapp'},
+   {label:'美团',bundleName:'com.sankuai.hmeituan'},
+   {label:'滴滴出行',bundleName:'com.sdu.didi.hmos.psnger'}
+  ]
+ },
+ {
+  title:'国内影音与购物',
+  items:[
+   {label:'哔哩哔哩',bundleName:'yylx.danmaku.bili'},
+   {label:'抖音',bundleName:'com.ss.hm.ugc.aweme'},
+   {label:'淘宝',bundleName:'com.taobao.taobao4hmos'},
+   {label:'京东',bundleName:'com.jd.hm.mall'}
+  ]
+ }
+];
+export function toggleScopePackage(scope: VpnScope,bundleName: string): VpnScope {
+ const trimmed: string=bundleName.trim();
+ if(!trimmed){return {mode:scope.mode,applications:[...scope.applications]};}
+ if(scope.applications.includes(trimmed)){
+  return {mode:scope.mode,applications:scope.applications.filter((item: string): boolean => item!==trimmed)};
+ }
+ return {mode:scope.mode,applications:[...scope.applications,trimmed]};
+}
 export function defaultVpnScope(): VpnScope {return {mode:'all',applications:[]};}
 export function validateVpnScope(mode: string,applications: string[]): VpnScope {
  if(!['all','include','exclude'].includes(mode)){throw new Error('未知应用范围');}
