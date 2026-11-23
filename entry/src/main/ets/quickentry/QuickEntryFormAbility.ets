@@ -10,7 +10,9 @@ export default class QuickEntryFormAbility extends FormExtensionAbility {
   if(typeof rawId==='string' && rawId.length>0){
    registerFormId(this.context.filesDir,rawId);
   }
-  return formBindingData.createFormBindingData(readCurrentCardState(this.context.filesDir));
+  const rawDimension: Object | undefined=want.parameters?.[formInfo.FormParam.DIMENSION_KEY];
+  const isWide: boolean=Number(rawDimension)===3;
+  return formBindingData.createFormBindingData(readCurrentCardState(this.context.filesDir,isWide));
  }
  onRemoveForm(formId: string): void {
   unregisterFormId(this.context.filesDir,formId);

@@ -1,6 +1,6 @@
 import { Want } from '@kit.AbilityKit';
 
-export function validShortcutAction(value: string): boolean {return ['connect','disconnect','overview'].includes(value);}
+export function validShortcutAction(value: string): boolean {return ['connect','disconnect','reconnect','overview'].includes(value);}
 export function shortcutActionFromWant(want: Want): string {
  if(want.uri){return '';}
  const direct=want.parameters?.shortcutAction;
@@ -27,6 +27,9 @@ export async function runShortcutAction(action: string,port: ShortcutPort): Prom
  if(action==='disconnect'){
   if(present || ['starting','running','checking','reconnecting','paused'].includes(phase)){await port.stop();}
   else {port.notify('VPN 已断开');}
+ } else if(action==='reconnect'){
+  if(present || ['starting','running','checking','reconnecting','paused'].includes(phase)){await port.reconnect();}
+  else {await port.start();}
  } else {
   if(present){port.notify('系统 VPN 已存在，可在总览检查连接');}
   else if(['starting','reconnecting','paused'].includes(phase)){port.notify('已有 VPN 会话，正在连接或按 Wi-Fi 条件暂停');}
