@@ -33,6 +33,9 @@ export class BackgroundSession {
  private lastTransferBytes: number=-1;
  private notificationUpdatedAt: number=0;
  private locationTicks: number=0;
+ private onVpnMissing?: () => Promise<boolean>;
+ private lastReviveAt: number=0;
+ private reviveAttempts: number=0;
  // Deliberately do not inspect, retain, serialize or log the Location object.
  private locationCallback=(_location: geoLocationManager.Location): void => {
   this.locationTicks++;
@@ -58,6 +61,7 @@ export class BackgroundSession {
   }
  };
  initialize(context: common.UIAbilityContext): void {this.context=context;if(this.taskId<0){this.publish('后台保障未运行');}this.diagnostics();}
+ setVpnMissingHandler(handler?: () => Promise<boolean>): void {this.onVpnMissing=handler;}
  private publish(message: string): void {AppStorage.setOrCreate('backgroundSessionStatus',message);}
  private diagnostics(errorCode: number=0): void {
   if(!this.context){return;}
@@ -166,8 +170,23 @@ export class BackgroundSession {
    // Use the system VPN, rather than an aged JS heartbeat, to confirm presence.
    const exists: boolean=await this.hasVpn();
    if(generation!==this.generation){return;}
-   if(exists){this.missingSince=0;}
-   else {if(this.missingSince===0){this.missingSince=Date.now();}if(Date.now()-this.missingSince>=90000){this.stop('未发现系统 VPN，定位辅助已释放');}}
+   if(exists){this.missingSince=0;this.reviveAttempts=0;}
+   else {
+    if(this.missingSince===0){this.missingSince=Date.now();}
+    if(this.onVpnMissing && Date.now()-this.missingSince>=10000 && Date.now()-this.lastReviveAt>=30000 && this.reviveAttempts<5){
+     this.lastReviveAt=Date.now();this.reviveAttempts++;
+     hilog.warn(0x1700,'SingboxHarmony','bgTask watchdog attempting vpn revive attempt=%{public}d',this.reviveAttempts);
+     try {
+      const revived: boolean=await this.onVpnMissing();
+      if(revived && generation===this.generation){
+       this.missingSince=Date.now();
+       hilog.info(0x1700,'SingboxHarmony','bgTask watchdog revive triggered');
+       return;
+      }
+     } catch(_err) {}
+    }
+    if(Date.now()-this.missingSince>=90000){this.stop('未发现系统 VPN，定位辅助已释放');}
+   }
    if(exists && status && status.phase==='running' && this.mode==='dataTransfer'){await this.updateTransferNotification(status,generation);}
   } catch(_error) {
    if(generation===this.generation){

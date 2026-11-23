@@ -144,6 +144,9 @@ struct Index {
  private lastLibraryRead: number=0;
  private healthChecking: boolean=false;
  private lastHealthCheck: number=0;
+ private lastVerifiedExpiredAt: number=0;
+ private lastVerifiedExists: boolean | undefined=undefined;
+ private lastAutoRecoverAt: number=0;
  private foregroundSince: number=0;
  private lastPingWrite: number=0;
  @State private applicationScope: VpnScope=defaultVpnScope();
@@ -174,6 +177,15 @@ struct Index {
  aboutToAppear(): void {
   this.pageVisible=true;
   backgroundSession.initialize(this.context);
+  backgroundSession.setVpnMissingHandler(async (): Promise<boolean> => {
+   const desired: DesiredVpnState=loadDesiredState(this.context.filesDir);
+   const cfg: AppSettings=loadSettings(this.context.filesDir);
+   if(desired.desired!=='connected' || !cfg.autoReconnect || !this.library.selected){return false;}
+   try {
+    await vpnExtension.startVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
+    return true;
+   } catch(_err) {return false;}
+  });
   this.scheduleStatus=readScheduleStatus(this.context.filesDir);
   this.settings=loadSettings(this.context.filesDir);
   try {this.applicationScope=loadVpnScope(this.context.filesDir);this.applicationScopeText=this.applicationScope.applications.join('\n');} catch(_error) {this.showToast('应用范围设置无法读取，请重新保存');}
@@ -205,6 +217,7 @@ struct Index {
  }
  aboutToDisappear(): void {
   this.pageVisible=false;
+  backgroundSession.setVpnMissingHandler(undefined);
   backgroundSession.stop();
   if(this.timer!==-1){clearInterval(this.timer);this.timer=-1;}
   if(this.toastTimer!==-1){clearTimeout(this.toastTimer);this.toastTimer=-1;}
@@ -221,20 +234,29 @@ struct Index {
   try {
    const latest: VpnStatus=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;
    if(vpnStatusExpired(latest)){
-    // Actively wake the VPN extension to flush a fresh heartbeat before declaring it stale.
+    // Actively wake the VPN extension via UDS (fallback to file IPC) before declaring it stale.
     try {writePrivate(`${this.context.filesDir}/ui-demand.json`,JSON.stringify({updatedAt:Date.now()}));this.lastDemandWrite=Date.now();} catch(_error) {}
     if(Date.now()-this.lastPingWrite>=2500){
      this.lastPingWrite=Date.now();
-     try {writePrivate(`${this.context.filesDir}/control-request.json`,JSON.stringify({id:util.generateRandomUUID(),createdAt:Date.now(),action:'ping'}));} catch(_error) {}
+     const pingPayload: string=JSON.stringify({id:util.generateRandomUUID(),createdAt:Date.now(),action:'ping'});
+     try {
+      bridge.udsRequest(`${this.context.filesDir}/control.sock`,pingPayload,1200).catch(() => {
+       try {writePrivate(`${this.context.filesDir}/control-request.json`,pingPayload);} catch(_e) {}
+      });
+     } catch(_error) {
+      try {writePrivate(`${this.context.filesDir}/control-request.json`,pingPayload);} catch(_e) {}
+     }
     }
     if(Date.now()-this.foregroundSince<4000){
      if(this.status.phase==='stopped'){this.status=latest;}
      return;
     }
-    this.status=assessExpiredVpnStatus(latest,undefined);
+    const knownPresent: boolean | undefined=this.lastVerifiedExpiredAt===latest.updatedAt?this.lastVerifiedExists:undefined;
+    this.status=assessExpiredVpnStatus(latest,knownPresent);
     if(!this.healthChecking && Date.now()-this.lastHealthCheck>=5000){this.verifyExpiredStatus(latest);}
     return;
    }
+   this.lastVerifiedExpiredAt=0;this.lastVerifiedExists=undefined;
    if(latest.updatedAt>=this.waitingSince){
     if(latest.updatedAt>this.lastTrafficTime){
      const seconds: number=(latest.updatedAt-this.lastTrafficTime)/1000;
@@ -290,7 +312,17 @@ struct Index {
     if(properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='172.19.0.1') && properties.linkAddresses.some((it: connection.LinkAddress): boolean => it.address.address==='fdfe:dcba:9876::1')){exists=true;break;}
    }
    const current=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;
-   if(current.updatedAt===snapshot.updatedAt && this.waitingSince<=snapshot.updatedAt){this.status=assessExpiredVpnStatus(current,exists);}
+   if(current.updatedAt===snapshot.updatedAt && this.waitingSince<=snapshot.updatedAt){
+    this.lastVerifiedExpiredAt=snapshot.updatedAt;
+    this.lastVerifiedExists=exists;
+    this.status=assessExpiredVpnStatus(current,exists);
+    const desired: DesiredVpnState=loadDesiredState(this.context.filesDir);
+    if(!exists && this.appForeground && this.pageVisible && !this.busy && this.library.selected && desired.desired==='connected' && this.settings.autoReconnect && Date.now()-this.lastAutoRecoverAt>=15000){
+     this.lastAutoRecoverAt=Date.now();
+     this.showToast('检测到后台 VPN 已停止，正在自动恢复连接…');
+     this.toggle(true);
+    }
+   }
   } catch(_error) {} finally {this.healthChecking=false;}
  }
  private async reconcileInitialStatus(): Promise<void> {
