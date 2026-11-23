@@ -159,6 +159,15 @@ export class BackgroundSession {
   }).catch(() => {this.publish('后台保障操作未完成');});
   return this.queue;
  }
+ private async hasWifiPhysicalNet(): Promise<boolean> {
+  try {
+   for(const net of await connection.getAllNets()){
+    const caps=await connection.getNetCapabilities(net);
+    if(caps.bearerTypes.includes(connection.NetBearType.BEARER_WIFI)){return true;}
+   }
+  } catch(_error) {}
+  return false;
+ }
  private async inspect(): Promise<void> {
   if(this.checking || !this.context || this.taskId<0){return;}this.checking=true;
   const generation: number=this.generation;
@@ -166,16 +175,22 @@ export class BackgroundSession {
    if(this.mode==='location' && (!this.permissionGranted() || !geoLocationManager.isLocationEnabled())){this.blocked=true;this.stop('定位权限或系统定位已关闭，辅助已停止');return;}
    let status: VpnStatus | undefined;
    try {status=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;} catch(_error) {}
-   if(status && status.updatedAt>=this.startedAt && ['stopped','error','paused'].includes(status.phase)){this.stop('VPN 已停止或暂停，定位辅助已释放');return;}
+   if(status && status.updatedAt>=this.startedAt && ['stopped','error'].includes(status.phase)){this.stop('VPN 已停止，后台保障已释放');return;}
    // Use the system VPN, rather than an aged JS heartbeat, to confirm presence.
    const exists: boolean=await this.hasVpn();
    if(generation!==this.generation){return;}
    if(exists){this.missingSince=0;this.reviveAttempts=0;}
+   else if(status && status.phase==='paused' && await this.hasWifiPhysicalNet()){
+    // Stay resident while paused on a bypass Wi-Fi so we can revive VPN when leaving Wi-Fi.
+    this.missingSince=0;
+    this.reviveAttempts=0;
+   }
    else {
     if(this.missingSince===0){this.missingSince=Date.now();}
-    if(this.onVpnMissing && Date.now()-this.missingSince>=10000 && Date.now()-this.lastReviveAt>=30000 && this.reviveAttempts<5){
+    const delayMs: number=status && status.phase==='paused'?3000:10000;
+    if(this.onVpnMissing && Date.now()-this.missingSince>=delayMs && Date.now()-this.lastReviveAt>=30000 && this.reviveAttempts<5){
      this.lastReviveAt=Date.now();this.reviveAttempts++;
-     hilog.warn(0x1700,'SingboxHarmony','bgTask watchdog attempting vpn revive attempt=%{public}d',this.reviveAttempts);
+     hilog.warn(0x1700,'SingboxHarmony','bgTask watchdog attempting vpn revive attempt=%{public}d fromPhase=%{public}s',this.reviveAttempts,status?.phase || 'unknown');
      try {
       const revived: boolean=await this.onVpnMissing();
       if(revived && generation===this.generation){

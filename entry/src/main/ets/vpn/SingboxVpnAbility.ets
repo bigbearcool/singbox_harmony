@@ -273,7 +273,9 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    this.status.physicalInterface = await this.physicalNetwork();
    this.requireAlive();
    if (this.bypassCurrentWifi) {
+    this.registerNetConnection();
     this.publish('paused', '已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');
+    this.registerNetConnection();
     this.networkTimer = setInterval(() => { this.tick(); }, 3000);
     return;
    }
@@ -327,6 +329,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
     await this.cleanup();
     if (this.destroyed) { return; }
     this.publish('paused', '已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');
+    this.registerNetConnection();
     this.networkTimer = setInterval(() => { this.tick(); }, 3000);
     return;
    }
@@ -390,6 +393,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
     await this.cleanup();
     if (this.destroyed) { return; }
     this.publish('paused', '已进入指定 Wi-Fi，VPN 已暂停；离开后恢复');
+    this.registerNetConnection();
     this.networkTimer = setInterval(() => { this.tick(); }, 3000);
     return;
    }
