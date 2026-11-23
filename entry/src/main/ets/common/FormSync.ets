@@ -106,10 +106,28 @@ export function readCurrentCardState(dir: string, isWide: boolean = false, mode:
  }
 }
 
+export interface CardUpdatePayload {
+ phase: string;
+ phaseLabel: string;
+ networkType: string;
+ active: boolean;
+ mode: string;
+ trafficLabel: string;
+}
+
 export function pushFormStatus(dir: string, status: VpnStatus, mode: string = ''): void {
  const ids: string[] = readFormIds(dir);
  if (ids.length === 0) { return; }
- const data: formBindingData.FormBindingData = formBindingData.createFormBindingData(cardStateFromStatus(status, mode));
+ const state: CardState = cardStateFromStatus(status, mode);
+ const payload: CardUpdatePayload = {
+  phase: state.phase,
+  phaseLabel: state.phaseLabel,
+  networkType: state.networkType,
+  active: state.active,
+  mode: state.mode,
+  trafficLabel: state.trafficLabel
+ };
+ const data: formBindingData.FormBindingData = formBindingData.createFormBindingData(payload);
  for (const id of ids) {
   try {
    formProvider.updateForm(id, data).catch(() => {});

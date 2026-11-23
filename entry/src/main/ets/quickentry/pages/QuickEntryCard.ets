@@ -192,12 +192,5 @@ struct QuickEntryCard {
   .backgroundColor(BRAND.background)
   .borderRadius(18)
   .border({ width: 1, color: this.phase === 'running' ? BRAND.cyan : BRAND.line })
-  .onAreaChange((_oldVal: Area, newVal: Area) => {
-   const w: number = Number(newVal.width);
-   if (Number.isFinite(w) && w > 0) {
-    this.wideLayout = w >= 220;
-    this.measured = true;
-   }
-  })
  }
 }
