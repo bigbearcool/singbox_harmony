@@ -36,6 +36,7 @@ export class BackgroundSession {
  private onVpnMissing?: () => Promise<boolean>;
  private lastReviveAt: number=0;
  private reviveAttempts: number=0;
+ private netConnection?: connection.NetConnection;
  // Deliberately do not inspect, retain, serialize or log the Location object.
  private locationCallback=(_location: geoLocationManager.Location): void => {
   this.locationTicks++;
@@ -147,6 +148,7 @@ export class BackgroundSession {
     if(generation!==this.generation){await this.release();return;}
     this.startedAt=Date.now();this.missingSince=this.startedAt;
     this.timer=setInterval(() => {this.inspect();},5000);
+    this.registerNetWatcher();
     hilog.info(0x1700,'SingboxHarmony','bgTask started mode=%{public}s taskId=%{public}d',this.mode,this.taskId);
     this.publish(this.mode==='location'?`定位辅助运行中（任务 #${this.taskId} · 等待首次保活回调）`:`数据传输后台任务运行中（任务 #${this.taskId}）`);
    } catch(error) {
@@ -159,6 +161,23 @@ export class BackgroundSession {
   }).catch(() => {this.publish('后台保障操作未完成');});
   return this.queue;
  }
+ private registerNetWatcher(): void {
+  if(this.netConnection){return;}
+  try {
+   if(typeof connection.createNetConnection!=='function'){return;}
+   const netCon: connection.NetConnection=connection.createNetConnection();
+   this.netConnection=netCon;
+   netCon.on('netAvailable',(): void => {this.inspect(true);});
+   netCon.on('netLost',(): void => {this.inspect(true);});
+   netCon.register((_err: BusinessError): void => {});
+  } catch(_error) {this.netConnection=undefined;}
+ }
+ private unregisterNetWatcher(): void {
+  if(!this.netConnection){return;}
+  const netCon: connection.NetConnection=this.netConnection;
+  this.netConnection=undefined;
+  try {netCon.unregister((_err: BusinessError): void => {});} catch(_error) {}
+ }
  private async hasWifiPhysicalNet(): Promise<boolean> {
   try {
    for(const net of await connection.getAllNets()){
@@ -168,7 +187,7 @@ export class BackgroundSession {
   } catch(_error) {}
   return false;
  }
- private async inspect(): Promise<void> {
+ private async inspect(fromNetworkEvent: boolean=false): Promise<void> {
   if(this.checking || !this.context || this.taskId<0){return;}this.checking=true;
   const generation: number=this.generation;
   try {
@@ -187,10 +206,10 @@ export class BackgroundSession {
    }
    else {
     if(this.missingSince===0){this.missingSince=Date.now();}
-    const delayMs: number=status && status.phase==='paused'?3000:10000;
+    const delayMs: number=fromNetworkEvent && status && status.phase==='paused'?0:(status && status.phase==='paused'?3000:10000);
     if(this.onVpnMissing && Date.now()-this.missingSince>=delayMs && Date.now()-this.lastReviveAt>=30000 && this.reviveAttempts<5){
      this.lastReviveAt=Date.now();this.reviveAttempts++;
-     hilog.warn(0x1700,'SingboxHarmony','bgTask watchdog attempting vpn revive attempt=%{public}d fromPhase=%{public}s',this.reviveAttempts,status?.phase || 'unknown');
+     hilog.warn(0x1700,'SingboxHarmony','bgTask watchdog attempting vpn revive attempt=%{public}d fromPhase=%{public}s netEvent=%{public}s',this.reviveAttempts,status?.phase || 'unknown',String(fromNetworkEvent));
      try {
       const revived: boolean=await this.onVpnMissing();
       if(revived && generation===this.generation){
@@ -241,6 +260,7 @@ export class BackgroundSession {
  }
  private async release(): Promise<void> {
   if(this.timer!==-1){clearInterval(this.timer);this.timer=-1;}
+  this.unregisterNetWatcher();
   let failed: boolean=false;
   if(this.subscribed){try {geoLocationManager.offLocationChange(this.locationCallback);this.subscribed=false;}catch(_error){failed=true;}}
   // off is scoped to our callbacks; never remove another consumer's listeners.
