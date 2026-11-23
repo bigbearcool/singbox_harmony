@@ -110,3 +110,39 @@ export async function runNetworkProbes(profile: string=''): Promise<string> {
  const labels: string[]=['IPv4 网页','IPv6 网页','IPv4 DNS A','IPv6 DNS AAAA'];
  return results.map((ok: boolean,index: number): string => `${labels[index]}：${ok?(index===3 && emptyAAAA?'已接管（配置返回空 AAAA）':'成功'):'未通过'}`).join('\n');
 }
+
+export interface HostDiagnosisResult {
+ host: string;
+ ipv4: string[];
+ ipv6: string[];
+ latencyMs: number;
+ mode: string;
+ dnsError?: string;
+}
+
+export function formatDiagnosisSummary(
+ host: string,
+ ipv4: string[],
+ ipv6: string[],
+ latencyMs: number,
+ mode: string,
+ dnsError?: string
+): string {
+ const cleanHost: string = host.trim() || '未知';
+ const cleanMode: string = mode.trim() || '未知';
+ const lines: string[] = [
+  `目标域名：${cleanHost}`,
+  `当前模式：${cleanMode}`,
+  `IPv4 解析：${ipv4.length > 0 ? ipv4.join(', ') : '无'}`,
+  `IPv6 解析：${ipv6.length > 0 ? ipv6.join(', ') : '无'}`,
+  `延迟：${Number.isFinite(latencyMs) && latencyMs >= 0 ? `${Math.round(latencyMs)} ms` : '不可用'}`
+ ];
+ if (dnsError && dnsError.trim().length > 0) {
+  lines.push(`DNS 错误：${dnsError.trim()}`);
+ }
+ return lines.join('\n');
+}
+
+export function formatDiagnosisResult(result: HostDiagnosisResult): string {
+ return formatDiagnosisSummary(result.host, result.ipv4, result.ipv6, result.latencyMs, result.mode, result.dnsError);
+}
