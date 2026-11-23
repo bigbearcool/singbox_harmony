@@ -30,20 +30,34 @@ func normalizeConfigForNetwork(input string, ipv6 bool) (string, error) {
 			return "", fmt.Errorf("MVP 暂不支持 %s", field)
 		}
 	}
-	// A userspace WireGuard client does not create a second system TUN/listener.
-	// Keep its peer keys, destinations and rules exactly as supplied by the user.
+	// Userspace client endpoints do not create a second system TUN or host listener.
+	// Keep their keys, destinations and rules exactly as supplied by the user.
 	if raw, ok := cfg["endpoints"]; ok {
 		var endpoints []struct {
-			Type       string `json:"type"`
-			System     bool   `json:"system"`
-			ListenPort uint16 `json:"listen_port"`
+			Type            string `json:"type"`
+			System          bool   `json:"system"`
+			SystemInterface bool   `json:"system_interface"`
+			ListenPort      uint16 `json:"listen_port"`
 		}
 		if err := json.Unmarshal(raw, &endpoints); err != nil {
 			return "", errors.New("endpoints 格式无效")
 		}
 		for _, endpoint := range endpoints {
-			if endpoint.Type != "wireguard" || endpoint.System || endpoint.ListenPort != 0 {
-				return "", errors.New("当前仅支持不指定监听端口的用户态 WireGuard endpoint")
+			switch endpoint.Type {
+			case "wireguard":
+				if endpoint.System || endpoint.ListenPort != 0 {
+					return "", errors.New("当前仅支持不指定监听端口的用户态 WireGuard endpoint")
+				}
+			case "tailscale":
+				if endpoint.SystemInterface || endpoint.ListenPort != 0 {
+					return "", errors.New("当前仅支持不指定监听端口的用户态 Tailscale endpoint")
+				}
+			case "openvpn-client", "openconnect":
+				if endpoint.System {
+					return "", fmt.Errorf("当前仅支持用户态 %s endpoint", endpoint.Type)
+				}
+			default:
+				return "", fmt.Errorf("当前不支持 %s endpoint", endpoint.Type)
 			}
 		}
 	}

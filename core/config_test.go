@@ -167,10 +167,75 @@ func TestUserspaceWireGuardProfile(t *testing.T) {
 	for _, bad := range []string{
 		strings.Replace(input, `"system":false`, `"system":true`, 1),
 		strings.Replace(input, `"system":false`, `"listen_port":51820`, 1),
-		strings.Replace(input, `"type":"wireguard"`, `"type":"tailscale"`, 1),
+		strings.Replace(input, `"type":"wireguard"`, `"type":"openvpn-server"`, 1),
 	} {
 		if _, err := normalizeConfig(bad); err == nil {
 			t.Fatal("accepted a system endpoint or a listening endpoint")
 		}
+	}
+}
+
+func TestTailscaleEndpointProfile(t *testing.T) {
+	endpoint := `{"type":"tailscale","tag":"ts","auth_key":"tskey-auth-example","hostname":"harmony-test"}`
+	input := `{"outbounds":[{"type":"direct","tag":"direct"}],"endpoints":[` + endpoint + `],"route":{"final":"direct","rules":[{"ip_cidr":["100.64.0.0/10"],"outbound":"ts"}]}}`
+	text, err := normalizeConfig(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, endpoint) || !strings.Contains(text, `"outbound":"ts"`) {
+		t.Fatal("Tailscale endpoint or its route was changed")
+	}
+	if err = libbox.CheckConfig(text); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		strings.Replace(input, `"hostname":"harmony-test"`, `"system_interface":true`, 1),
+		strings.Replace(input, `"hostname":"harmony-test"`, `"listen_port":41641`, 1),
+	} {
+		if _, err := normalizeConfig(bad); err == nil {
+			t.Fatal("accepted a system or listening Tailscale endpoint")
+		}
+	}
+}
+
+func TestOpenVPNAndOpenConnectEndpointProfiles(t *testing.T) {
+	ovpn := `{"type":"openvpn-client","tag":"ovpn","server":"198.51.100.1","server_port":1194,"username":"user","password":"pass","tls":{"peer_fingerprint":["0000000000000000000000000000000000000000000000000000000000000000"]}}`
+	ovpnInput := `{"outbounds":[{"type":"direct","tag":"direct"}],"endpoints":[` + ovpn + `],"route":{"final":"direct","rules":[{"ip_cidr":["10.8.0.0/24"],"outbound":"ovpn"}]}}`
+	text, err := normalizeConfig(ovpnInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = libbox.CheckConfig(text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := normalizeConfig(strings.Replace(ovpnInput, `"server_port":1194`, `"server_port":1194,"system":true`, 1)); err == nil {
+		t.Fatal("accepted a system OpenVPN endpoint")
+	}
+
+	oc := `{"type":"openconnect","tag":"oc","server":"vpn.example.com","username":"user","password":"pass"}`
+	ocInput := `{"outbounds":[{"type":"direct","tag":"direct"}],"endpoints":[` + oc + `],"route":{"final":"direct","rules":[{"ip_cidr":["10.9.0.0/24"],"outbound":"oc"}]}}`
+	text, err = normalizeConfig(ocInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = libbox.CheckConfig(text); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := normalizeConfig(strings.Replace(ocInput, `"server":"vpn.example.com"`, `"server":"vpn.example.com","system":true`, 1)); err == nil {
+		t.Fatal("accepted a system OpenConnect endpoint")
+	}
+}
+
+func TestDHCPDNSServerProfile(t *testing.T) {
+	input := `{"outbounds":[{"type":"direct","tag":"direct"}],"dns":{"servers":[{"type":"dhcp","tag":"dhcp-dns"}],"final":"dhcp-dns"},"route":{"final":"direct"}}`
+	text, err := normalizeConfig(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, `"type":"dhcp"`) || !strings.Contains(text, `"default_domain_resolver":{"server":"dhcp-dns"}`) {
+		t.Fatal(text)
+	}
+	if err = libbox.CheckConfig(text); err != nil {
+		t.Fatal(err)
 	}
 }

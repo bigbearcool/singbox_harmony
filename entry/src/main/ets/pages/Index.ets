@@ -11,9 +11,9 @@ import { ScheduleStatus, readScheduleStatus, syncSubscriptionSchedule } from '..
 import { UpdateReport, readUpdateReport, runDueProfileUpdates } from '../common/SubscriptionUpdates';
 import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
 import { VpnScope, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
-import { parseWifiNames, parseSsidPolicyLines, formatSsidPolicyLines } from '../common/WifiConditions';
+import { usableSsid, SsidPolicyRule, parseWifiNames, parseSsidPolicyLines, formatSsidPolicyLines } from '../common/WifiConditions';
 import { DesiredVpnState, DesiredVpnMode, defaultDesiredState, loadDesiredState, saveDesiredState } from '../common/AlwaysOn';
-import { LocalOverrides, defaultLocalOverrides, loadLocalOverrides, saveLocalOverrides, parseDomainList, parseHostLines, formatHostLines } from '../common/LocalOverrides';
+import { HostOverride, LocalOverrides, defaultLocalOverrides, loadLocalOverrides, saveLocalOverrides, parseDomainList, parseCidrList, parseHostLines, formatHostLines } from '../common/LocalOverrides';
 import { validShortcutAction, runShortcutAction } from '../common/ShortcutActions';
 import { BRAND, BEAR_THEME } from '../common/BrandTheme';
 import bridge from 'libsingboxbridge.so';
@@ -92,8 +92,23 @@ struct Index {
  @State private overrideDirectText: string='';
  @State private overrideProxyText: string='';
  @State private overrideRejectText: string='';
+ @State private overrideDirectCidrText: string='';
+ @State private overrideProxyCidrText: string='';
+ @State private overrideRejectCidrText: string='';
  @State private overrideHostsText: string='';
  @State private overridesExpanded: boolean=false;
+ @State private overrideRuleType: string='domain';
+ @State private overrideAction: string='direct';
+ @State private overrideTargetInput: string='';
+ @State private overrideHostDomainInput: string='';
+ @State private overrideHostIpInput: string='';
+ @State private overrideBatchExpanded: boolean=false;
+ @State private ssidInput: string='';
+ @State private ssidAction: string='mode';
+ @State private ssidModeInput: string='direct';
+ @State private ssidGroupInput: string='';
+ @State private ssidOutboundInput: string='';
+ @State private ssidBatchExpanded: boolean=false;
  @State private sharedCode: string='';
  @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
  @StorageLink('pendingShortcut') @Watch('consumeShortcut') private pendingShortcut: string='';
@@ -148,10 +163,7 @@ struct Index {
   this.ssidPoliciesText=formatSsidPolicyLines(this.settings.ssidPolicies);
   this.desiredState=loadDesiredState(this.context.filesDir);
   this.localOverrides=loadLocalOverrides(this.context.filesDir);
-  this.overrideDirectText=this.localOverrides.directDomains.join('\n');
-  this.overrideProxyText=this.localOverrides.proxyDomains.join('\n');
-  this.overrideRejectText=this.localOverrides.rejectDomains.join('\n');
-  this.overrideHostsText=formatHostLines(this.localOverrides.hosts);
+  this.syncOverrideTexts(this.localOverrides);
   this.allowAutomaticConnect=!this.pendingShortcut;
   this.consumePendingLink();
   try {this.library=loadLibrary(this.context.filesDir);} catch(_error) {this.showToast('配置索引读取失败，原文件已保留');}
@@ -505,33 +517,230 @@ struct Index {
   } catch(_error) {this.showToast('定位辅助设置未完成，请检查系统权限');}
   finally {this.locationChanging=false;}
  }
+ private updateSsidPolicies(rules: SsidPolicyRule[],toastText: string): void {
+  this.settings={
+   autoReconnect:this.settings.autoReconnect,
+   autoConnect:this.settings.autoConnect,
+   logLevel:this.settings.logLevel,
+   onDemand:this.settings.onDemand,
+   bypassWifi:this.settings.bypassWifi,
+   locationAssist:this.settings.locationAssist,
+   backgroundUpdates:this.settings.backgroundUpdates,
+   blackholeOnSwitch:this.settings.blackholeOnSwitch,
+   ssidPolicies:rules
+  };
+  this.ssidPoliciesText=formatSsidPolicyLines(rules);
+  saveSettings(this.context.filesDir,this.settings);
+  this.showToast(toastText);
+ }
  private saveSsidPolicies(): void {
   try {
-   this.settings.ssidPolicies=parseSsidPolicyLines(this.ssidPoliciesText);
-   this.ssidPoliciesText=formatSsidPolicyLines(this.settings.ssidPolicies);
-   this.saveOptions();
+   const parsed: SsidPolicyRule[]=parseSsidPolicyLines(this.ssidPoliciesText);
+   this.updateSsidPolicies(parsed,'SSID 策略已保存');
   } catch(error) {
    this.showToast(error instanceof Error?error.message:'SSID 策略格式无效，请检查后重试');
   }
  }
- private toggleLocalOverridesEnabled(value: boolean): void {
-  const next: LocalOverrides={
-   enabled:value,
-   hosts:this.localOverrides.hosts,
-   directDomains:this.localOverrides.directDomains,
-   proxyDomains:this.localOverrides.proxyDomains,
-   rejectDomains:this.localOverrides.rejectDomains,
-   directCidrs:this.localOverrides.directCidrs,
-   proxyCidrs:this.localOverrides.proxyCidrs,
-   rejectCidrs:this.localOverrides.rejectCidrs
+ private availableModes(): string[] {
+  return this.dashboard.modes.length>0?this.dashboard.modes:['rule','global','direct'];
+ }
+ private selectedSsidGroup(): OutboundGroup | undefined {
+  return this.dashboard.groups.find((g: OutboundGroup): boolean => g.tag===this.ssidGroupInput);
+ }
+ private selectedSsidGroupItems(): GroupItem[] {
+  const group: OutboundGroup | undefined=this.selectedSsidGroup();
+  return group?group.items:[];
+ }
+ private ssidPolicyBadgeLabel(rule: SsidPolicyRule): string {
+  if(rule.action==='pause'){return '暂停隧道';}
+  if(rule.action==='mode'){return `模式: ${rule.mode || ''}`;}
+  return `${rule.group || ''} → ${rule.outbound || ''}`;
+ }
+ private ssidPolicyBadgeColor(rule: SsidPolicyRule): string {
+  if(rule.action==='pause'){return BRAND.coral;}
+  if(rule.action==='mode'){return BRAND.cyan;}
+  return BRAND.green;
+ }
+ private addSsidPolicyRule(): void {
+  const ssid: string=this.ssidInput.trim();
+  if(!usableSsid(ssid)){
+   this.showToast('Wi-Fi 名称应为 1 至 32 字节，按原名称精确匹配');
+   return;
+  }
+  let rule: SsidPolicyRule;
+  if(this.ssidAction==='pause'){
+   rule={ssid:ssid,action:'pause'};
+  } else if(this.ssidAction==='mode'){
+   const mode: string=this.ssidModeInput.trim();
+   if(mode.length===0){
+    this.showToast('请选择或输入目标模式');
+    return;
+   }
+   rule={ssid:ssid,action:'mode',mode:mode};
+  } else {
+   const group: string=this.ssidGroupInput.trim();
+   const outbound: string=this.ssidOutboundInput.trim();
+   if(group.length===0 || outbound.length===0){
+    this.showToast('请选择或输入策略组与目标节点');
+    return;
+   }
+   rule={ssid:ssid,action:'group',group:group,outbound:outbound};
+  }
+  const existingIndex: number=this.settings.ssidPolicies.findIndex((r: SsidPolicyRule): boolean => r.ssid===ssid);
+  const nextRules: SsidPolicyRule[]=this.settings.ssidPolicies.slice();
+  if(existingIndex>=0){
+   nextRules[existingIndex]=rule;
+  } else {
+   if(nextRules.length>=128){
+    this.showToast('最多保存 128 条 SSID 策略');
+    return;
+   }
+   nextRules.push(rule);
+  }
+  this.ssidInput='';
+  this.updateSsidPolicies(nextRules,existingIndex>=0?'已更新 SSID 策略':'已添加 SSID 策略');
+ }
+ private removeSsidPolicyRule(ssid: string): void {
+  const nextRules: SsidPolicyRule[]=this.settings.ssidPolicies.filter((r: SsidPolicyRule): boolean => r.ssid!==ssid);
+  this.updateSsidPolicies(nextRules,'已删除 SSID 策略');
+ }
+ private syncOverrideTexts(overrides: LocalOverrides): void {
+  this.overrideDirectText=overrides.directDomains.join('\n');
+  this.overrideProxyText=overrides.proxyDomains.join('\n');
+  this.overrideRejectText=overrides.rejectDomains.join('\n');
+  this.overrideDirectCidrText=overrides.directCidrs.join('\n');
+  this.overrideProxyCidrText=overrides.proxyCidrs.join('\n');
+  this.overrideRejectCidrText=overrides.rejectCidrs.join('\n');
+  this.overrideHostsText=formatHostLines(overrides.hosts);
+ }
+ private cloneLocalOverrides(src: LocalOverrides): LocalOverrides {
+  return {
+   enabled:src.enabled,
+   hosts:src.hosts.map((h: HostOverride): HostOverride => ({domain:h.domain,ips:h.ips.slice()})),
+   directDomains:src.directDomains.slice(),
+   proxyDomains:src.proxyDomains.slice(),
+   rejectDomains:src.rejectDomains.slice(),
+   directCidrs:src.directCidrs.slice(),
+   proxyCidrs:src.proxyCidrs.slice(),
+   rejectCidrs:src.rejectCidrs.slice()
   };
+ }
+ private toggleLocalOverridesEnabled(value: boolean): void {
+  const next: LocalOverrides=this.cloneLocalOverrides(this.localOverrides);
+  next.enabled=value;
   try {
    saveLocalOverrides(this.context.filesDir,next);
    this.localOverrides=next;
+   if(value){this.overridesExpanded=true;}
    this.showToast(value?'已启用本地覆写（重连生效）':'已关闭本地覆写（重连生效）');
   } catch(_error) {
    this.showToast('本地覆写开关保存失败');
   }
+ }
+ private addLocalOverrideRule(): void {
+  try {
+   const next: LocalOverrides=this.cloneLocalOverrides(this.localOverrides);
+   if(this.overrideRuleType==='domain'){
+    const parsed: string[]=parseDomainList(this.overrideTargetInput);
+    if(parsed.length===0){this.showToast('请输入有效域名，例如 example.com');return;}
+    for(const domain of parsed){
+     next.directDomains=next.directDomains.filter((d: string): boolean => d!==domain);
+     next.proxyDomains=next.proxyDomains.filter((d: string): boolean => d!==domain);
+     next.rejectDomains=next.rejectDomains.filter((d: string): boolean => d!==domain);
+     if(this.overrideAction==='direct'){next.directDomains.push(domain);}
+     else if(this.overrideAction==='proxy'){next.proxyDomains.push(domain);}
+     else {next.rejectDomains.push(domain);}
+    }
+    saveLocalOverrides(this.context.filesDir,next);
+    this.localOverrides=next;
+    this.syncOverrideTexts(next);
+    this.overrideTargetInput='';
+    this.showToast('已添加规则，重连后生效');
+   } else if(this.overrideRuleType==='cidr'){
+    const parsed: string[]=parseCidrList(this.overrideTargetInput);
+    if(parsed.length===0){this.showToast('请输入有效网段，例如 192.168.1.0/24');return;}
+    for(const cidr of parsed){
+     next.directCidrs=next.directCidrs.filter((c: string): boolean => c!==cidr);
+     next.proxyCidrs=next.proxyCidrs.filter((c: string): boolean => c!==cidr);
+     next.rejectCidrs=next.rejectCidrs.filter((c: string): boolean => c!==cidr);
+     if(this.overrideAction==='direct'){next.directCidrs.push(cidr);}
+     else if(this.overrideAction==='proxy'){next.proxyCidrs.push(cidr);}
+     else {next.rejectCidrs.push(cidr);}
+    }
+    saveLocalOverrides(this.context.filesDir,next);
+    this.localOverrides=next;
+    this.syncOverrideTexts(next);
+    this.overrideTargetInput='';
+    this.showToast('已添加规则，重连后生效');
+   } else {
+    const domain: string=this.overrideHostDomainInput.trim();
+    const ip: string=this.overrideHostIpInput.trim();
+    if(domain.length===0 || ip.length===0){this.showToast('请输入域名与目标 IP');return;}
+    const parsed: HostOverride[]=parseHostLines(`${domain} = ${ip}`);
+    if(parsed.length===0){this.showToast('请输入有效的 Host 映射');return;}
+    for(const entry of parsed){
+     const existing: HostOverride | undefined=next.hosts.find((h: HostOverride): boolean => h.domain===entry.domain);
+     if(existing){
+      for(const addr of entry.ips){
+       if(!existing.ips.includes(addr)){existing.ips.push(addr);}
+      }
+     } else {
+      next.hosts.push({domain:entry.domain,ips:entry.ips.slice()});
+     }
+    }
+    saveLocalOverrides(this.context.filesDir,next);
+    this.localOverrides=next;
+    this.syncOverrideTexts(next);
+    this.overrideHostDomainInput='';
+    this.overrideHostIpInput='';
+    this.showToast('已添加规则，重连后生效');
+   }
+  } catch(error) {
+   this.showToast(error instanceof Error?error.message:'规则格式无效，请检查后重试');
+  }
+ }
+ private removeLocalOverrideRule(item: OverrideRuleItem): void {
+  try {
+   const next: LocalOverrides=this.cloneLocalOverrides(this.localOverrides);
+   if(item.category==='rejectDomain'){next.rejectDomains=next.rejectDomains.filter((d: string): boolean => d!==item.rawKey);}
+   else if(item.category==='directDomain'){next.directDomains=next.directDomains.filter((d: string): boolean => d!==item.rawKey);}
+   else if(item.category==='proxyDomain'){next.proxyDomains=next.proxyDomains.filter((d: string): boolean => d!==item.rawKey);}
+   else if(item.category==='rejectCidr'){next.rejectCidrs=next.rejectCidrs.filter((c: string): boolean => c!==item.rawKey);}
+   else if(item.category==='directCidr'){next.directCidrs=next.directCidrs.filter((c: string): boolean => c!==item.rawKey);}
+   else if(item.category==='proxyCidr'){next.proxyCidrs=next.proxyCidrs.filter((c: string): boolean => c!==item.rawKey);}
+   else if(item.category==='host'){next.hosts=next.hosts.filter((h: HostOverride): boolean => h.domain!==item.rawKey);}
+   saveLocalOverrides(this.context.filesDir,next);
+   this.localOverrides=next;
+   this.syncOverrideTexts(next);
+   this.showToast('已删除规则，重连后生效');
+  } catch(_error) {
+   this.showToast('删除规则失败');
+  }
+ }
+ private overrideRuleItems(): OverrideRuleItem[] {
+  const items: OverrideRuleItem[]=[];
+  for(const d of this.localOverrides.rejectDomains){
+   items.push({key:`reject-domain-${d}`,badge:'REJECT',badgeColor:BRAND.coral,typeTag:'DOMAIN',target:d,rawKey:d,category:'rejectDomain'});
+  }
+  for(const c of this.localOverrides.rejectCidrs){
+   items.push({key:`reject-cidr-${c}`,badge:'REJECT',badgeColor:BRAND.coral,typeTag:'CIDR',target:c,rawKey:c,category:'rejectCidr'});
+  }
+  for(const d of this.localOverrides.directDomains){
+   items.push({key:`direct-domain-${d}`,badge:'DIRECT',badgeColor:BRAND.green,typeTag:'DOMAIN',target:d,rawKey:d,category:'directDomain'});
+  }
+  for(const c of this.localOverrides.directCidrs){
+   items.push({key:`direct-cidr-${c}`,badge:'DIRECT',badgeColor:BRAND.green,typeTag:'CIDR',target:c,rawKey:c,category:'directCidr'});
+  }
+  for(const d of this.localOverrides.proxyDomains){
+   items.push({key:`proxy-domain-${d}`,badge:'PROXY',badgeColor:BRAND.cyan,typeTag:'DOMAIN',target:d,rawKey:d,category:'proxyDomain'});
+  }
+  for(const c of this.localOverrides.proxyCidrs){
+   items.push({key:`proxy-cidr-${c}`,badge:'PROXY',badgeColor:BRAND.cyan,typeTag:'CIDR',target:c,rawKey:c,category:'proxyCidr'});
+  }
+  for(const h of this.localOverrides.hosts){
+   items.push({key:`host-${h.domain}-${h.ips.join(',')}`,badge:'HOST',badgeColor:BRAND.amber,typeTag:'',target:`${h.domain} → ${h.ips.join(', ')}`,rawKey:h.domain,category:'host'});
+  }
+  return items;
  }
  private saveLocalOverridesForm(): void {
   try {
@@ -541,19 +750,16 @@ struct Index {
     directDomains:parseDomainList(this.overrideDirectText),
     proxyDomains:parseDomainList(this.overrideProxyText),
     rejectDomains:parseDomainList(this.overrideRejectText),
-    directCidrs:this.localOverrides.directCidrs,
-    proxyCidrs:this.localOverrides.proxyCidrs,
-    rejectCidrs:this.localOverrides.rejectCidrs
+    directCidrs:parseCidrList(this.overrideDirectCidrText),
+    proxyCidrs:parseCidrList(this.overrideProxyCidrText),
+    rejectCidrs:parseCidrList(this.overrideRejectCidrText)
    };
    saveLocalOverrides(this.context.filesDir,next);
    this.localOverrides=next;
-   this.overrideDirectText=next.directDomains.join('\n');
-   this.overrideProxyText=next.proxyDomains.join('\n');
-   this.overrideRejectText=next.rejectDomains.join('\n');
-   this.overrideHostsText=formatHostLines(next.hosts);
+   this.syncOverrideTexts(next);
    this.showToast('本地覆写已保存，重连后生效');
   } catch(error) {
-   this.showToast(error instanceof Error?error.message:'本地覆写格式无效，请检查域名与 Host 映射');
+   this.showToast(error instanceof Error?error.message:'本地覆写格式无效，请检查域名、网段与 Host 映射');
   }
  }
  private phaseLabel(): string {
@@ -625,9 +831,12 @@ struct Index {
   return source.filter((c: ConnectionInfo): boolean => `${c.domain} ${c.destination} ${c.outbound} ${c.rule || ''}`.toLowerCase().includes(query));
  }
  private overridesSummary(): string {
-  const total: number=this.localOverrides.directDomains.length+this.localOverrides.proxyDomains.length+this.localOverrides.rejectDomains.length+this.localOverrides.hosts.length;
+  const domainCount: number=this.localOverrides.directDomains.length+this.localOverrides.proxyDomains.length+this.localOverrides.rejectDomains.length;
+  const cidrCount: number=this.localOverrides.directCidrs.length+this.localOverrides.proxyCidrs.length+this.localOverrides.rejectCidrs.length;
+  const hostCount: number=this.localOverrides.hosts.length;
+  const total: number=domainCount+cidrCount+hostCount;
   if(!this.localOverrides.enabled){return `已关闭 · ${total} 条规则`;}
-  return `已启用 · 域名 ${this.localOverrides.directDomains.length+this.localOverrides.proxyDomains.length+this.localOverrides.rejectDomains.length} · Host ${this.localOverrides.hosts.length}`;
+  return `已启用 · 域名 ${domainCount} · 网段 ${cidrCount} · Host ${hostCount}`;
  }
  private scopeSummary(): string {
   if(this.applicationScope.mode==='include'){return `仅指定 ${this.applicationScope.applications.length} 个应用`;}
@@ -1161,12 +1370,116 @@ struct Index {
     }
     Divider().color(BRAND.line)
     Row(){
-     Column({space:2}){Text('SSID 策略联动（Surge 式）').fontSize(14).fontColor(BRAND.text);Text(`已配置 ${this.settings.ssidPolicies.length} 条 · 按 Wi-Fi 切换模式或节点`).fontSize(11).fontColor(BRAND.muted)}.alignItems(HorizontalAlign.Start).layoutWeight(1)
+     Column({space:2}){Text('SSID 策略联动（Surge 式）').fontSize(14).fontColor(BRAND.text);Text(`已配置 ${this.settings.ssidPolicies.length} 条 · 按 Wi-Fi 切换模式、节点或暂停`).fontSize(11).fontColor(BRAND.muted)}.alignItems(HorizontalAlign.Start).layoutWeight(1)
      SymbolGlyph(this.ssidPolicyExpanded?$r('sys.symbol.chevron_down'):$r('sys.symbol.chevron_right')).fontSize(14).fontColor([BRAND.muted])
     }.width('100%').onClick(() => {this.ssidPolicyExpanded=!this.ssidPolicyExpanded;})
     if(this.ssidPolicyExpanded){
-     TextArea({text:this.ssidPoliciesText,placeholder:'HomeWiFi = mode:direct\nHomeWiFi = group:Proxy:DIRECT\nOfficeWiFi = pause'}).height(96).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.ssidPoliciesText=value;})
-     Button('保存 SSID 策略').height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).width('100%').onClick(() => {this.saveSsidPolicies();})
+     // Graphical SSID Policy Builder
+     Column({space:10}) {
+      TextInput({text:this.ssidInput,placeholder:'精确 Wi-Fi 名称（SSID），例如 HomeWiFi'}).height(38).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.ssidInput=value;})
+      // Action Selector (3 capsule pills)
+      Row({space:6}) {
+       Button('切模式').layoutWeight(1).height(32).fontSize(12).fontWeight(this.ssidAction==='mode'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.ssidAction==='mode'?BRAND.cyan:BRAND.surface).fontColor(this.ssidAction==='mode'?BRAND.onAccent:BRAND.muted).borderRadius(16).border({width:1,color:this.ssidAction==='mode'?BRAND.cyan:BRAND.line}).padding(0).onClick(() => {this.ssidAction='mode';})
+       Button('切节点').layoutWeight(1).height(32).fontSize(12).fontWeight(this.ssidAction==='group'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.ssidAction==='group'?BRAND.green:BRAND.surface).fontColor(this.ssidAction==='group'?BRAND.onAccent:BRAND.muted).borderRadius(16).border({width:1,color:this.ssidAction==='group'?BRAND.green:BRAND.line}).padding(0).onClick(() => {this.ssidAction='group';if(!this.ssidGroupInput && this.dashboard.groups.length>0){this.ssidGroupInput=this.dashboard.groups[0].tag;this.ssidOutboundInput=this.dashboard.groups[0].selected || (this.dashboard.groups[0].items.length>0?this.dashboard.groups[0].items[0].tag:'');}})
+       Button('暂停').layoutWeight(1).height(32).fontSize(12).fontWeight(this.ssidAction==='pause'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.ssidAction==='pause'?BRAND.coral:BRAND.surface).fontColor(this.ssidAction==='pause'?BRAND.onAccent:BRAND.muted).borderRadius(16).border({width:1,color:this.ssidAction==='pause'?BRAND.coral:BRAND.line}).padding(0).onClick(() => {this.ssidAction='pause';})
+      }.width('100%')
+
+      // Dynamic Secondary Controls
+      if(this.ssidAction==='mode'){
+       Flex({wrap:FlexWrap.Wrap}) {
+        ForEach(this.availableModes(),(mode: string) => {
+         Text(mode)
+          .fontSize(11)
+          .fontWeight(this.ssidModeInput===mode?FontWeight.Bold:FontWeight.Medium)
+          .fontColor(this.ssidModeInput===mode?BRAND.onAccent:BRAND.cyan)
+          .backgroundColor(this.ssidModeInput===mode?BRAND.cyan:BRAND.elevated)
+          .borderRadius(14)
+          .border({width:1,color:this.ssidModeInput===mode?BRAND.cyan:BRAND.line})
+          .padding({left:12,right:12,top:5,bottom:5})
+          .margin({right:6,bottom:6})
+          .onClick(() => {this.ssidModeInput=mode;})
+        },(mode: string): string => `${mode}-${this.ssidModeInput===mode?1:0}`)
+       }.width('100%')
+       TextInput({text:this.ssidModeInput,placeholder:'或输入自定义模式名，如 direct'}).height(34).fontSize(12).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.ssidModeInput=value;})
+      } else if(this.ssidAction==='group'){
+       if(this.dashboard.groups.length>0){
+        Text('选择策略组').fontSize(11).fontColor(BRAND.muted).width('100%')
+        Flex({wrap:FlexWrap.Wrap}) {
+         ForEach(this.dashboard.groups,(group: OutboundGroup) => {
+          Text(group.tag)
+           .fontSize(11)
+           .fontWeight(this.ssidGroupInput===group.tag?FontWeight.Bold:FontWeight.Medium)
+           .fontColor(this.ssidGroupInput===group.tag?BRAND.onAccent:BRAND.text)
+           .backgroundColor(this.ssidGroupInput===group.tag?BRAND.green:BRAND.elevated)
+           .borderRadius(14)
+           .border({width:1,color:this.ssidGroupInput===group.tag?BRAND.green:BRAND.line})
+           .padding({left:10,right:10,top:5,bottom:5})
+           .margin({right:6,bottom:6})
+           .onClick(() => {this.ssidGroupInput=group.tag;this.ssidOutboundInput=group.selected || (group.items.length>0?group.items[0].tag:'');})
+         },(group: OutboundGroup): string => `${group.tag}-${this.ssidGroupInput===group.tag?1:0}`)
+        }.width('100%')
+        if(this.selectedSsidGroupItems().length>0){
+         Text('选择目标节点').fontSize(11).fontColor(BRAND.muted).width('100%')
+         Flex({wrap:FlexWrap.Wrap}) {
+          ForEach(this.selectedSsidGroupItems(),(item: GroupItem) => {
+           Text(item.tag)
+            .fontSize(11)
+            .fontWeight(this.ssidOutboundInput===item.tag?FontWeight.Bold:FontWeight.Medium)
+            .fontColor(this.ssidOutboundInput===item.tag?BRAND.onAccent:BRAND.cyan)
+            .backgroundColor(this.ssidOutboundInput===item.tag?BRAND.cyan:BRAND.elevated)
+            .borderRadius(14)
+            .border({width:1,color:this.ssidOutboundInput===item.tag?BRAND.cyan:BRAND.line})
+            .padding({left:10,right:10,top:5,bottom:5})
+            .margin({right:6,bottom:6})
+            .onClick(() => {this.ssidOutboundInput=item.tag;})
+          },(item: GroupItem): string => `${item.tag}-${this.ssidOutboundInput===item.tag?1:0}`)
+         }.width('100%')
+        }
+       }
+       Row({space:8}) {
+        TextInput({text:this.ssidGroupInput,placeholder:'策略组（如 Proxy）'}).height(34).fontSize(12).layoutWeight(1).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.ssidGroupInput=value;})
+        TextInput({text:this.ssidOutboundInput,placeholder:'节点（如 DIRECT）'}).height(34).fontSize(12).layoutWeight(1).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.ssidOutboundInput=value;})
+       }.width('100%')
+      } else {
+       Text('连入该 Wi-Fi 时自动暂停 VPN 隧道，离开后自动恢复。').fontSize(11).fontColor(BRAND.muted).width('100%')
+      }
+
+      Button('+ 添加策略').height(36).fontSize(12).borderRadius(10).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).width('100%').onClick(() => {this.addSsidPolicyRule();})
+     }.padding(12).width('100%').backgroundColor(BRAND.background).borderRadius(12).border({width:1,color:BRAND.line})
+
+     // Visual SSID Policy Cards
+     if(this.settings.ssidPolicies.length===0){
+      this.note({value:'暂无 SSID 策略，使用上方构建器快速添加。'})
+     } else {
+      Column({space:6}) {
+       ForEach(this.settings.ssidPolicies,(rule: SsidPolicyRule) => {
+        Row({space:8}) {
+         SymbolGlyph($r('sys.symbol.wifi')).fontSize(15).fontColor([BRAND.cyan])
+         Text(rule.ssid).fontSize(13).fontWeight(FontWeight.Medium).fontColor(BRAND.text).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis}).layoutWeight(1)
+         Text(this.ssidPolicyBadgeLabel(rule))
+          .fontSize(10)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.ssidPolicyBadgeColor(rule))
+          .backgroundColor(BRAND.elevated)
+          .borderRadius(8)
+          .border({width:1,color:this.ssidPolicyBadgeColor(rule)})
+          .padding({left:7,right:7,top:3,bottom:3})
+          .maxLines(1)
+         Text('×').fontSize(16).fontWeight(FontWeight.Bold).fontColor(BRAND.coral).padding({left:6,right:2,top:2,bottom:2}).onClick(() => {this.removeSsidPolicyRule(rule.ssid);})
+        }.width('100%').padding({left:10,right:10,top:9,bottom:9}).backgroundColor(BRAND.background).borderRadius(11).border({width:1,color:BRAND.line})
+       },(rule: SsidPolicyRule): string => `${rule.ssid}-${rule.action}-${rule.mode || ''}-${rule.group || ''}-${rule.outbound || ''}`)
+      }.width('100%')
+     }
+
+     // Secondary Collapsible Batch Text Editor
+     Row({space:6}) {
+      Text('高级文本编辑').fontSize(12).fontColor(BRAND.muted).layoutWeight(1)
+      SymbolGlyph(this.ssidBatchExpanded?$r('sys.symbol.chevron_down'):$r('sys.symbol.chevron_right')).fontSize(12).fontColor([BRAND.muted])
+     }.width('100%').padding({top:4,bottom:2}).onClick(() => {this.ssidBatchExpanded=!this.ssidBatchExpanded;})
+     if(this.ssidBatchExpanded){
+      TextArea({text:this.ssidPoliciesText,placeholder:'HomeWiFi = mode:direct\nHomeWiFi = group:Proxy:DIRECT\nOfficeWiFi = pause'}).height(96).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.ssidPoliciesText=value;})
+      Button('保存文本策略').height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.saveSsidPolicies();})
+     }
     }
    }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
 
@@ -1177,17 +1490,96 @@ struct Index {
      Column({space:2}){Text('启用本地覆写').fontSize(14).fontColor(BRAND.text);Text(this.overridesSummary()).fontSize(11).fontColor(BRAND.muted)}.alignItems(HorizontalAlign.Start).layoutWeight(1).onClick(() => {this.overridesExpanded=!this.overridesExpanded;})
      Toggle({type:ToggleType.Switch,isOn:this.localOverrides.enabled}).onChange((value: boolean) => {if(value!==this.localOverrides.enabled){this.toggleLocalOverridesEnabled(value);}})
     }.width('100%')
-    Button(this.overridesExpanded?'收起覆写编辑器':'编辑置顶规则与 Host 映射').height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.overridesExpanded=!this.overridesExpanded;})
+    Button(this.overridesExpanded?'收起规则与 Host 构建器':'管理置顶规则与 Host 映射').height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.overridesExpanded=!this.overridesExpanded;})
     if(this.overridesExpanded){
-     Text('置顶直连域名').fontSize(12).fontColor(BRAND.muted).width('100%')
-     TextArea({text:this.overrideDirectText,placeholder:'internal.company.com'}).height(68).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideDirectText=value;})
-     Text('置顶代理域名').fontSize(12).fontColor(BRAND.muted).width('100%')
-     TextArea({text:this.overrideProxyText,placeholder:'api.example.com'}).height(68).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideProxyText=value;})
-     Text('置顶拒绝域名').fontSize(12).fontColor(BRAND.muted).width('100%')
-     TextArea({text:this.overrideRejectText,placeholder:'ads.example.com'}).height(68).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideRejectText=value;})
-     Text('静态 Host 映射（domain = ip）').fontSize(12).fontColor(BRAND.muted).width('100%')
-     TextArea({text:this.overrideHostsText,placeholder:'nas.home = 192.168.1.10'}).height(76).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideHostsText=value;})
-     Button('保存本地覆写（重连生效）').height(38).fontSize(13).borderRadius(10).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).width('100%').onClick(() => {this.saveLocalOverridesForm();})
+     // Graphical Quick-Add Rule Builder
+     Column({space:10}) {
+      // Rule Type Selector (3 capsule pills)
+      Row({space:6}) {
+       Button('域名 (DOMAIN)').layoutWeight(1).height(32).fontSize(11).fontWeight(this.overrideRuleType==='domain'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.overrideRuleType==='domain'?BRAND.cyan:BRAND.surface).fontColor(this.overrideRuleType==='domain'?BRAND.onAccent:BRAND.muted).borderRadius(16).border({width:1,color:this.overrideRuleType==='domain'?BRAND.cyan:BRAND.line}).padding(0).onClick(() => {this.overrideRuleType='domain';})
+       Button('网段 (CIDR)').layoutWeight(1).height(32).fontSize(11).fontWeight(this.overrideRuleType==='cidr'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.overrideRuleType==='cidr'?BRAND.cyan:BRAND.surface).fontColor(this.overrideRuleType==='cidr'?BRAND.onAccent:BRAND.muted).borderRadius(16).border({width:1,color:this.overrideRuleType==='cidr'?BRAND.cyan:BRAND.line}).padding(0).onClick(() => {this.overrideRuleType='cidr';})
+       Button('Host 映射').layoutWeight(1).height(32).fontSize(11).fontWeight(this.overrideRuleType==='host'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.overrideRuleType==='host'?BRAND.amber:BRAND.surface).fontColor(this.overrideRuleType==='host'?BRAND.onAccent:BRAND.muted).borderRadius(16).border({width:1,color:this.overrideRuleType==='host'?BRAND.amber:BRAND.line}).padding(0).onClick(() => {this.overrideRuleType='host';})
+      }.width('100%')
+
+      if(this.overrideRuleType==='domain' || this.overrideRuleType==='cidr'){
+       // Policy Action Selector (3 colored capsule pills)
+       Row({space:6}) {
+        Button('直连 DIRECT').layoutWeight(1).height(30).fontSize(11).fontWeight(this.overrideAction==='direct'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.overrideAction==='direct'?BRAND.green:BRAND.surface).fontColor(this.overrideAction==='direct'?BRAND.onAccent:BRAND.green).borderRadius(15).border({width:1,color:this.overrideAction==='direct'?BRAND.green:BRAND.line}).padding(0).onClick(() => {this.overrideAction='direct';})
+        Button('代理 PROXY').layoutWeight(1).height(30).fontSize(11).fontWeight(this.overrideAction==='proxy'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.overrideAction==='proxy'?BRAND.cyan:BRAND.surface).fontColor(this.overrideAction==='proxy'?BRAND.onAccent:BRAND.cyan).borderRadius(15).border({width:1,color:this.overrideAction==='proxy'?BRAND.cyan:BRAND.line}).padding(0).onClick(() => {this.overrideAction='proxy';})
+        Button('拒绝 REJECT').layoutWeight(1).height(30).fontSize(11).fontWeight(this.overrideAction==='reject'?FontWeight.Bold:FontWeight.Medium).backgroundColor(this.overrideAction==='reject'?BRAND.coral:BRAND.surface).fontColor(this.overrideAction==='reject'?BRAND.onAccent:BRAND.coral).borderRadius(15).border({width:1,color:this.overrideAction==='reject'?BRAND.coral:BRAND.line}).padding(0).onClick(() => {this.overrideAction='reject';})
+       }.width('100%')
+       Row({space:8}) {
+        TextInput({text:this.overrideTargetInput,placeholder:this.overrideRuleType==='domain'?'example.com':'192.168.1.0/24'}).height(38).layoutWeight(1).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.overrideTargetInput=value;})
+        Button('+ 添加').height(38).fontSize(12).borderRadius(10).padding({left:14,right:14}).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).onClick(() => {this.addLocalOverrideRule();})
+       }.width('100%')
+      } else {
+       Row({space:8}) {
+        TextInput({text:this.overrideHostDomainInput,placeholder:'nas.home'}).height(38).layoutWeight(1).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.overrideHostDomainInput=value;})
+        TextInput({text:this.overrideHostIpInput,placeholder:'192.168.1.10'}).height(38).layoutWeight(1).backgroundColor(BRAND.surface).borderRadius(10).onChange((value: string) => {this.overrideHostIpInput=value;})
+       }.width('100%')
+       Button('+ 添加').height(36).fontSize(12).borderRadius(10).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).width('100%').onClick(() => {this.addLocalOverrideRule();})
+      }
+     }.padding(12).width('100%').backgroundColor(BRAND.background).borderRadius(12).border({width:1,color:BRAND.line})
+
+     // Visual Rule Cards
+     if(this.overrideRuleItems().length===0){
+      this.note({value:'暂无本地覆写规则，使用上方构建器快速添加。'})
+     } else {
+      Column({space:6}) {
+       ForEach(this.overrideRuleItems(),(rule: OverrideRuleItem) => {
+        Row({space:6}) {
+         Text(rule.badge)
+          .fontSize(10)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(rule.badgeColor)
+          .backgroundColor(BRAND.elevated)
+          .borderRadius(7)
+          .border({width:1,color:rule.badgeColor})
+          .padding({left:7,right:7,top:2,bottom:2})
+         if(rule.typeTag){
+          Text(rule.typeTag)
+           .fontSize(9)
+           .fontWeight(FontWeight.Medium)
+           .fontColor(BRAND.muted)
+           .backgroundColor(BRAND.soft)
+           .borderRadius(6)
+           .padding({left:5,right:5,top:2,bottom:2})
+         }
+         Text(rule.target)
+          .fontSize(12)
+          .fontFamily('monospace')
+          .fontColor(BRAND.text)
+          .maxLines(1)
+          .textOverflow({overflow:TextOverflow.Ellipsis})
+          .layoutWeight(1)
+         Text('×').fontSize(16).fontWeight(FontWeight.Bold).fontColor(BRAND.coral).padding({left:6,right:2,top:2,bottom:2}).onClick(() => {this.removeLocalOverrideRule(rule);})
+        }.width('100%').padding({left:10,right:10,top:8,bottom:8}).backgroundColor(BRAND.background).borderRadius(11).border({width:1,color:BRAND.line})
+       },(rule: OverrideRuleItem): string => rule.key)
+      }.width('100%')
+     }
+
+     // Secondary Collapsible Batch Text Editor
+     Row({space:6}) {
+      Text('批量文本编辑').fontSize(12).fontColor(BRAND.muted).layoutWeight(1)
+      SymbolGlyph(this.overrideBatchExpanded?$r('sys.symbol.chevron_down'):$r('sys.symbol.chevron_right')).fontSize(12).fontColor([BRAND.muted])
+     }.width('100%').padding({top:4,bottom:2}).onClick(() => {this.overrideBatchExpanded=!this.overrideBatchExpanded;})
+     if(this.overrideBatchExpanded){
+      Text('置顶直连域名').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideDirectText,placeholder:'internal.company.com'}).height(60).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideDirectText=value;})
+      Text('置顶代理域名').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideProxyText,placeholder:'api.example.com'}).height(60).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideProxyText=value;})
+      Text('置顶拒绝域名').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideRejectText,placeholder:'ads.example.com'}).height(60).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideRejectText=value;})
+      Text('置顶直连网段 (CIDR)').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideDirectCidrText,placeholder:'192.168.1.0/24'}).height(56).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideDirectCidrText=value;})
+      Text('置顶代理网段 (CIDR)').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideProxyCidrText,placeholder:'10.20.0.0/16'}).height(56).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideProxyCidrText=value;})
+      Text('置顶拒绝网段 (CIDR)').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideRejectCidrText,placeholder:'203.0.113.0/24'}).height(56).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideRejectCidrText=value;})
+      Text('静态 Host 映射（domain = ip）').fontSize(11).fontColor(BRAND.muted).width('100%')
+      TextArea({text:this.overrideHostsText,placeholder:'nas.home = 192.168.1.10'}).height(68).fontFamily('monospace').fontSize(11).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.overrideHostsText=value;})
+      Button('保存批量编辑（重连生效）').height(36).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.saveLocalOverridesForm();})
+     }
     }
    }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
 
@@ -1268,3 +1660,12 @@ struct Index {
 }
 
 interface NoteText {value: string;}
+interface OverrideRuleItem {
+ key: string;
+ badge: string;
+ badgeColor: string;
+ typeTag: string;
+ target: string;
+ rawKey: string;
+ category: string;
+}

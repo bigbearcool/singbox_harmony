@@ -18,7 +18,7 @@ MAP
 cd "$ROOT_DIR/core"
 python3 "$ROOT_DIR/scripts/prepare-ohos-module.py" "$GO_BIN"
 "$GO_BIN" build -mod=readonly -modfile=generated/ohos.mod -trimpath -buildmode=c-shared \
- -tags 'with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard' \
+ -tags 'with_gvisor,with_quic,with_utls,with_clash_api,with_wireguard,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_openvpn,with_openconnect,with_dhcp' \
  -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=1.14.3 -linkmode external -extldflags '-Wl,--version-script=$ROOT_DIR/core/generated/exports.map -Wl,-z,lazy -Wl,-soname,libsingbox.so'" \
  -o "$ROOT_DIR/entry/src/main/cpp/prebuilt/arm64-v8a/libsingbox.so" .
 "$NATIVE_DIR/llvm/bin/llvm-readelf" -h -l "$ROOT_DIR/entry/src/main/cpp/prebuilt/arm64-v8a/libsingbox.so" > "$ROOT_DIR/core/generated/elf.txt"
