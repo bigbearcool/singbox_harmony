@@ -11,18 +11,31 @@ import { ScheduleStatus, readScheduleStatus, syncSubscriptionSchedule } from '..
 import { UpdateReport, readUpdateReport, runDueProfileUpdates } from '../common/SubscriptionUpdates';
 import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
 import { VpnScope, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
-import { parseWifiNames } from '../common/WifiConditions';
+import { parseWifiNames, parseSsidPolicyLines, formatSsidPolicyLines } from '../common/WifiConditions';
+import { DesiredVpnState, DesiredVpnMode, defaultDesiredState, loadDesiredState, saveDesiredState } from '../common/AlwaysOn';
+import { LocalOverrides, defaultLocalOverrides, loadLocalOverrides, saveLocalOverrides, parseDomainList, parseHostLines, formatHostLines } from '../common/LocalOverrides';
 import { validShortcutAction, runShortcutAction } from '../common/ShortcutActions';
 import { BRAND, BEAR_THEME } from '../common/BrandTheme';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
 import { SavedProfile, ProfileLibrary, AppSettings, ProfileFetchCancellation, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
-import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, WireGuardInfo, WireGuardPeer, emptyDashboard, readDashboard, sendControl } from '../common/Control';
+import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, WireGuardInfo, WireGuardPeer, HostDiagnosis, emptyDashboard, readDashboard, sendControl, diagnoseHost } from '../common/Control';
 
 function bytesLabel(value: number): string {
  if(value>=1073741824){return `${(value/1073741824).toFixed(2)} GB`;}
  if(value>=1048576){return `${(value/1048576).toFixed(1)} MB`;}
  return `${(value/1024).toFixed(1)} KB`;
+}
+function durationLabel(ms: number): string {
+ if(ms<=0){return '0 ms';}
+ if(ms<1000){return `${Math.round(ms)} ms`;}
+ if(ms<60000){return `${(ms/1000).toFixed(1)} s`;}
+ const mins: number=Math.floor(ms/60000);
+ const secs: number=Math.floor((ms%60000)/1000);
+ return `${mins}m ${secs}s`;
+}
+function emptyDiagnosis(): HostDiagnosis {
+ return {host:'',ipv4:[],ipv6:[],latencyMs:0,summary:''};
 }
 
 @Entry
@@ -50,6 +63,21 @@ struct Index {
  @State private uploadRate: number=0;
  @State private downloadRate: number=0;
  @State private wifiRulesText: string='';
+ @State private ssidPoliciesText: string='';
+ @State private desiredState: DesiredVpnState=defaultDesiredState();
+ @State private sortNodesByDelay: boolean=false;
+ @State private connectionViewMode: string='active';
+ @State private diagnoseInput: string='';
+ @State private diagnosing: boolean=false;
+ @State private hasDiagnosis: boolean=false;
+ @State private diagnosisResult: HostDiagnosis=emptyDiagnosis();
+ @State private diagnosisError: string='';
+ @State private localOverrides: LocalOverrides=defaultLocalOverrides();
+ @State private overrideDirectText: string='';
+ @State private overrideProxyText: string='';
+ @State private overrideRejectText: string='';
+ @State private overrideHostsText: string='';
+ @State private overridesExpanded: boolean=false;
  @State private sharedCode: string='';
  @StorageLink('pendingRemoteProfile') @Watch('consumePendingLink') private pendingRemoteProfile: string='';
  @StorageLink('pendingShortcut') @Watch('consumeShortcut') private pendingShortcut: string='';
@@ -92,6 +120,13 @@ struct Index {
   this.settings=loadSettings(this.context.filesDir);
   try {this.applicationScope=loadVpnScope(this.context.filesDir);this.applicationScopeText=this.applicationScope.applications.join('\n');} catch(_error) {this.message='应用范围设置无法读取，请重新保存';}
   this.wifiRulesText=this.settings.bypassWifi.join('\n');
+  this.ssidPoliciesText=formatSsidPolicyLines(this.settings.ssidPolicies);
+  this.desiredState=loadDesiredState(this.context.filesDir);
+  this.localOverrides=loadLocalOverrides(this.context.filesDir);
+  this.overrideDirectText=this.localOverrides.directDomains.join('\n');
+  this.overrideProxyText=this.localOverrides.proxyDomains.join('\n');
+  this.overrideRejectText=this.localOverrides.rejectDomains.join('\n');
+  this.overrideHostsText=formatHostLines(this.localOverrides.hosts);
   this.allowAutomaticConnect=!this.pendingShortcut;
   this.consumePendingLink();
   try {this.library=loadLibrary(this.context.filesDir);} catch(_error) {this.message='配置索引读取失败，原文件已保留';}
@@ -99,8 +134,13 @@ struct Index {
   try {
    this.observer=vpnExtension.createVpnObserver();
    this.observer.onAuthorizationResult((allowed: boolean) => {
-    if(!allowed){this.waitingSince=0;this.status=initialStatus();this.message='已取消系统 VPN 授权';}
-    if(!allowed){backgroundSession.stop('VPN 授权被取消，定位辅助已释放');}
+    if(!allowed){
+     this.waitingSince=0;
+     this.status=initialStatus();
+     this.persistDesiredState('stopped');
+     this.message='系统 VPN 授权被拒绝，请重新授权后再连接';
+     backgroundSession.stop('VPN 授权被取消，定位辅助已释放');
+    }
    });
   } catch(_error) {}
   bridge.version().then((value: string) => {this.coreVersion=value;}).catch(() => {this.coreVersion='内核加载失败';});
@@ -148,6 +188,7 @@ struct Index {
    writePrivate(`${this.context.filesDir}/dashboard-demand.json`,JSON.stringify({updatedAt:Date.now()}));
    this.dashboard=readDashboard(this.context.filesDir);
   }
+  this.desiredState=loadDesiredState(this.context.filesDir);
  }
  private active(): boolean {return this.status.phase==='running' || this.status.phase==='starting' || this.status.phase==='reconnecting' || this.status.phase==='paused' || this.status.phase==='checking';}
  private async verifyExpiredStatus(snapshot: VpnStatus): Promise<void> {
@@ -213,8 +254,23 @@ struct Index {
   } catch(_error) {this.message='快捷操作未完成，请在总览中重试';}
   finally {this.busy=false;this.shortcutHandling=false;}
  }
+ private persistDesiredState(desired: DesiredVpnMode): void {
+  const current: DesiredVpnState=loadDesiredState(this.context.filesDir);
+  const next: DesiredVpnState={
+   desired:desired,
+   updatedAt:Date.now(),
+   lastInterruptionAt:desired==='stopped'?undefined:current.lastInterruptionAt,
+   lastInterruptionReason:desired==='stopped'?undefined:current.lastInterruptionReason,
+   lastHandoverAt:current.lastHandoverAt,
+   handoverCount:current.handoverCount || 0,
+   selfHealCount:current.selfHealCount || 0
+  };
+  saveDesiredState(this.context.filesDir,next);
+  this.desiredState=next;
+ }
  private async disconnectVpn(): Promise<void> {
   this.allowAutomaticConnect=false;
+  this.persistDesiredState('stopped');
   await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
   await backgroundSession.stop();
   this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
@@ -232,6 +288,7 @@ struct Index {
     const check: CoreResponse=JSON.parse(await bridge.check(content)) as CoreResponse;
     if(!check.ok){this.message='配置未通过内核校验，请编辑配置后重试';return;}
     writePrivate(`${this.context.filesDir}/profile.json`,content);
+    this.persistDesiredState('connected');
     this.status={phase:'starting',message:'等待系统 VPN 授权',tunName:'',physicalInterface:'',ipv6AddressPresent:false,updatedAt:Date.now()};
     this.waitingSince=this.status.updatedAt;
     await backgroundSession.beginSession();
@@ -411,7 +468,7 @@ struct Index {
   catch(_error) {this.message='保存未完成，请填写 1 至 256 个有效包名，每行一个';}
  }
  private locationOptions(value: boolean): AppSettings {
-  return {autoReconnect:this.settings.autoReconnect,autoConnect:this.settings.autoConnect,logLevel:this.settings.logLevel,onDemand:this.settings.onDemand,bypassWifi:this.settings.bypassWifi,locationAssist:value,backgroundUpdates:this.settings.backgroundUpdates};
+  return {autoReconnect:this.settings.autoReconnect,autoConnect:this.settings.autoConnect,logLevel:this.settings.logLevel,onDemand:this.settings.onDemand,bypassWifi:this.settings.bypassWifi,locationAssist:value,backgroundUpdates:this.settings.backgroundUpdates,blackholeOnSwitch:this.settings.blackholeOnSwitch,ssidPolicies:this.settings.ssidPolicies};
  }
  private async toggleLocationAssist(value: boolean): Promise<void> {
   if(this.locationChanging){return;}this.locationChanging=true;
@@ -422,9 +479,99 @@ struct Index {
   } catch(_error) {this.message='定位辅助设置未完成，请检查系统权限';}
   finally {this.locationChanging=false;}
  }
+ private saveSsidPolicies(): void {
+  try {
+   this.settings.ssidPolicies=parseSsidPolicyLines(this.ssidPoliciesText);
+   this.ssidPoliciesText=formatSsidPolicyLines(this.settings.ssidPolicies);
+   this.saveOptions();
+  } catch(error) {
+   this.message=error instanceof Error?error.message:'SSID 策略格式无效，请检查后重试';
+  }
+ }
+ private toggleLocalOverridesEnabled(value: boolean): void {
+  const next: LocalOverrides={
+   enabled:value,
+   hosts:this.localOverrides.hosts,
+   directDomains:this.localOverrides.directDomains,
+   proxyDomains:this.localOverrides.proxyDomains,
+   rejectDomains:this.localOverrides.rejectDomains,
+   directCidrs:this.localOverrides.directCidrs,
+   proxyCidrs:this.localOverrides.proxyCidrs,
+   rejectCidrs:this.localOverrides.rejectCidrs
+  };
+  try {
+   saveLocalOverrides(this.context.filesDir,next);
+   this.localOverrides=next;
+   this.message=value?'已启用本地覆写，不修改原始订阅，重连后生效':'已关闭本地覆写，重连后生效';
+  } catch(_error) {
+   this.message='本地覆写开关保存失败';
+  }
+ }
+ private saveLocalOverridesForm(): void {
+  try {
+   const next: LocalOverrides={
+    enabled:this.localOverrides.enabled,
+    hosts:parseHostLines(this.overrideHostsText),
+    directDomains:parseDomainList(this.overrideDirectText),
+    proxyDomains:parseDomainList(this.overrideProxyText),
+    rejectDomains:parseDomainList(this.overrideRejectText),
+    directCidrs:this.localOverrides.directCidrs,
+    proxyCidrs:this.localOverrides.proxyCidrs,
+    rejectCidrs:this.localOverrides.rejectCidrs
+   };
+   saveLocalOverrides(this.context.filesDir,next);
+   this.localOverrides=next;
+   this.overrideDirectText=next.directDomains.join('\n');
+   this.overrideProxyText=next.proxyDomains.join('\n');
+   this.overrideRejectText=next.rejectDomains.join('\n');
+   this.overrideHostsText=formatHostLines(next.hosts);
+   this.message='本地覆写已保存，不修改原始订阅，重连后生效';
+  } catch(error) {
+   this.message=error instanceof Error?error.message:'本地覆写格式无效，请检查域名与 Host 映射';
+  }
+ }
+ private delayColor(delay?: number): string {
+  if(!delay || delay<=0){return BRAND.muted;}
+  if(delay<150){return '#4CD98B';}
+  if(delay<400){return '#F4C27B';}
+  return BRAND.coral;
+ }
+ private orderedGroupItems(items: GroupItem[]): GroupItem[] {
+  if(!this.sortNodesByDelay){return items;}
+  const copy: GroupItem[]=items.slice();
+  copy.sort((a: GroupItem,b: GroupItem): number => {
+   const da: number=a.urlTestDelay && a.urlTestDelay>0?a.urlTestDelay:Number.MAX_SAFE_INTEGER;
+   const db: number=b.urlTestDelay && b.urlTestDelay>0?b.urlTestDelay:Number.MAX_SAFE_INTEGER;
+   if(da!==db){return da-db;}
+   return a.tag.localeCompare(b.tag);
+  });
+  return copy;
+ }
+ private connectionDurationMs(item: ConnectionInfo): number {
+  if(item.durationMs && item.durationMs>0){return item.durationMs;}
+  if(item.closedAt && item.closedAt>item.createdAt){return item.closedAt-item.createdAt;}
+  if(item.createdAt>0){return Math.max(0,Date.now()-item.createdAt);}
+  return 0;
+ }
+ private async runHostDiagnosis(): Promise<void> {
+  if(this.diagnosing){return;}
+  const host: string=this.diagnoseInput.trim();
+  if(host.length===0){this.diagnosisError='请输入要诊断的域名或 IP';return;}
+  this.diagnosing=true;
+  this.diagnosisError='';
+  try {
+   this.diagnosisResult=await diagnoseHost(this.context.filesDir,host);
+   this.hasDiagnosis=true;
+  } catch(error) {
+   this.diagnosisError=error instanceof Error?error.message:'诊断未完成，请确认 VPN 处于连接状态';
+  } finally {
+   this.diagnosing=false;
+  }
+ }
  private visibleConnections(): ConnectionInfo[] {
   const query: string=this.connectionFilter.toLowerCase();
-  return this.dashboard.connections.filter((c: ConnectionInfo): boolean => `${c.domain} ${c.destination} ${c.outbound}`.toLowerCase().includes(query));
+  const source: ConnectionInfo[]=this.connectionViewMode==='recent'?(this.dashboard.recentRequests || []):this.dashboard.connections;
+  return source.filter((c: ConnectionInfo): boolean => `${c.domain} ${c.destination} ${c.outbound} ${c.rule || ''}`.toLowerCase().includes(query));
  }
 
  @Builder private title(text: string) {Text(text).fontSize(26).fontWeight(FontWeight.Bold).fontColor(BRAND.text).width('100%')}
@@ -465,7 +612,36 @@ struct Index {
      }.width('100%')
     }
     if(this.probeResult){this.note({value:this.probeResult})}
+    if(this.status.phase==='running' && this.dashboard.modes.length>0){
+     Column({space:8}) {
+      Text(`出站模式 · ${this.dashboard.mode || '默认'}`).fontSize(12).fontColor(BRAND.muted).width('100%')
+      Scroll() {
+       Row({space:8}) {
+        ForEach(this.dashboard.modes,(mode: string) => {
+         Button(mode)
+          .height(34)
+          .fontSize(13)
+          .fontWeight(mode===this.dashboard.mode?FontWeight.Bold:FontWeight.Medium)
+          .backgroundColor(mode===this.dashboard.mode?BRAND.cyan:BRAND.soft)
+          .fontColor(mode===this.dashboard.mode?BRAND.onAccent:BRAND.cyan)
+          .borderRadius(17)
+          .padding({left:16,right:16})
+          .enabled(!this.controlBusy && mode!==this.dashboard.mode)
+          .onClick(() => {this.control('mode','','','',mode);})
+        },(mode: string): string => `${mode}-${this.dashboard.mode}`)
+       }
+      }.scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off).width('100%')
+     }.width('100%').padding({top:6})
+    }
    }.padding(22).width('100%').backgroundColor(BRAND.surface).borderRadius(22).border({width:1,color:BRAND.line})
+   Column({space:10}) {
+    Text('Always-On 韧性状态').fontSize(15).fontWeight(FontWeight.Medium).fontColor(BRAND.text).width('100%')
+    this.note({value:`热切换 ${this.desiredState.handoverCount || 0} 次 · 自愈 ${this.desiredState.selfHealCount || 0} 次 · 目标状态：${this.desiredState.desired==='connected'?'保持连接':'已停止'}`})
+    if(this.desiredState.desired==='connected' && !this.active()){
+     Text(`上次中断：${this.desiredState.lastInterruptionReason || '系统回收或网络异常'}${this.desiredState.lastInterruptionAt?` · ${new Date(this.desiredState.lastInterruptionAt).toLocaleString()}`:''}`).fontSize(13).fontColor(BRAND.coral).width('100%')
+     Button('一键恢复连接').backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).width('100%').enabled(!this.busy).onClick(() => {this.toggle();})
+    }
+   }.padding(18).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
    if(this.status.phase==='running'){
     ForEach(this.dashboard.wireGuard,(wg: WireGuardInfo) => {
      Column({space:12}) {
@@ -538,43 +714,79 @@ struct Index {
    this.title('节点分组')
    if(this.status.phase!=='running'){this.note({value:'连接 VPN 后查看分组、切换节点和测试延迟。'})}
    else {
+    Row(){
+     Text('按延迟排序').fontSize(14).fontColor(BRAND.text).layoutWeight(1)
+     Toggle({type:ToggleType.Switch,isOn:this.sortNodesByDelay}).onChange((value: boolean) => {this.sortNodesByDelay=value;})
+    }.padding({left:16,right:16,top:10,bottom:10}).width('100%').backgroundColor(BRAND.surface).borderRadius(16).border({width:1,color:BRAND.line})
     if(this.dashboard.groups.length===0){this.note({value:'正在读取分组；当前配置也可能没有 selector 或 urltest。'})}
     ForEach(this.dashboard.groups,(group: OutboundGroup) => {
      Column({space:10}) {
       Text(group.tag).fontSize(20).fontWeight(FontWeight.Medium).width('100%')
       this.note({value:`${group.type} · 当前：${group.selected}`})
       Button('测试本组延迟').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(!this.controlBusy).onClick(() => {this.control('urltest','',group.tag);})
-      ForEach(group.items,(item: GroupItem) => {
+      ForEach(this.orderedGroupItems(group.items),(item: GroupItem) => {
        Row({space:8}) {
         Column({space:4}) {
          Text(`${group.selected===item.tag?'● ':''}${item.tag}`).fontSize(15).width('100%')
-         Text(`${item.type} · ${item.urlTestDelay?`${item.urlTestDelay} ms`:'尚无有效延迟'}`).fontSize(12).fontColor(BRAND.muted).width('100%')
+         Row({space:6}) {
+          Text(item.type).fontSize(12).fontColor(BRAND.muted)
+          Text('·').fontSize(12).fontColor(BRAND.muted)
+          Text(item.urlTestDelay && item.urlTestDelay>0?`${item.urlTestDelay} ms`:'尚无有效延迟').fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.delayColor(item.urlTestDelay))
+         }.width('100%')
         }.layoutWeight(1)
         Button('测速').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('urltest','',item.tag);})
         if(group.selectable){Button('选择').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).fontSize(12).enabled(!this.controlBusy && group.selected!==item.tag).onClick(() => {this.control('select',group.tag,item.tag);})}
        }.width('100%').padding({top:8,bottom:8})
-      },(item: GroupItem): string => item.tag)
+      },(item: GroupItem): string => `${item.tag}-${item.urlTestDelay || 0}-${group.selected===item.tag?1:0}-${this.sortNodesByDelay?1:0}`)
      }.padding(18).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
-    },(group: OutboundGroup): string => `${group.tag}-${group.selected}-${group.items.map((item: GroupItem): string => `${item.tag}:${item.urlTestTime || 0}:${item.urlTestDelay || 0}`).join('|')}`)
+    },(group: OutboundGroup): string => `${group.tag}-${group.selected}-${this.sortNodesByDelay?1:0}-${group.items.map((item: GroupItem): string => `${item.tag}:${item.urlTestTime || 0}:${item.urlTestDelay || 0}`).join('|')}`)
    }
   }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
  @Builder private connectionsPage() {
   Column({space:14}) {
    this.title('连接')
-   if(this.status.phase!=='running'){this.note({value:'连接 VPN 后查看活动连接。'})}
+   if(this.status.phase!=='running'){this.note({value:'连接 VPN 后查看活动连接、最近请求和域名诊断。'})}
    else {
-    TextInput({text:this.connectionFilter,placeholder:'搜索域名、地址或出站'}).onChange((value: string) => {this.connectionFilter=value;})
-    this.note({value:`活动连接 ${this.dashboard.connections.length}（最多显示最新 200 条）`})
-    Button('关闭全部连接').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).width('100%').enabled(!this.controlBusy).onClick(() => {this.control('close-all');})
+    Column({space:10}) {
+     Text('域名 / DNS 诊断').fontSize(15).fontWeight(FontWeight.Medium).fontColor(BRAND.text).width('100%')
+     Row({space:8}) {
+      TextInput({text:this.diagnoseInput,placeholder:'输入域名或 IP，例如 example.com'}).layoutWeight(1).onChange((value: string) => {this.diagnoseInput=value;})
+      Button(this.diagnosing?'诊断中…':'诊断').backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).enabled(!this.diagnosing && this.diagnoseInput.trim().length>0).onClick(() => {this.runHostDiagnosis();})
+     }.width('100%')
+     if(this.diagnosisError){Text(this.diagnosisError).fontSize(12).fontColor(BRAND.coral).width('100%')}
+     if(this.hasDiagnosis){
+      Column({space:4}) {
+       Text(this.diagnosisResult.summary).fontSize(13).fontWeight(FontWeight.Medium).fontColor(BRAND.text).width('100%')
+       this.note({value:`IPv4：${this.diagnosisResult.ipv4.length>0?this.diagnosisResult.ipv4.join(', '):'无'}`})
+       this.note({value:`IPv6：${this.diagnosisResult.ipv6.length>0?this.diagnosisResult.ipv6.join(', '):'无'}`})
+       this.note({value:`耗时：${this.diagnosisResult.latencyMs} ms · 模式：${this.diagnosisResult.mode || this.dashboard.mode || '默认'}`})
+       if(this.diagnosisResult.dnsError){Text(`DNS 异常：${this.diagnosisResult.dnsError}`).fontSize(12).fontColor(BRAND.coral).width('100%')}
+      }.padding(12).width('100%').backgroundColor(BRAND.soft).borderRadius(12)
+     }
+    }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
+    Row({space:8}) {
+     Button(`活跃连接 (${this.dashboard.connections.length})`).layoutWeight(1).backgroundColor(this.connectionViewMode==='active'?BRAND.cyan:BRAND.soft).fontColor(this.connectionViewMode==='active'?BRAND.onAccent:BRAND.cyan).fontWeight(this.connectionViewMode==='active'?FontWeight.Bold:FontWeight.Medium).onClick(() => {this.connectionViewMode='active';})
+     Button(`最近请求 (${(this.dashboard.recentRequests || []).length})`).layoutWeight(1).backgroundColor(this.connectionViewMode==='recent'?BRAND.cyan:BRAND.soft).fontColor(this.connectionViewMode==='recent'?BRAND.onAccent:BRAND.cyan).fontWeight(this.connectionViewMode==='recent'?FontWeight.Bold:FontWeight.Medium).onClick(() => {this.connectionViewMode='recent';})
+    }.width('100%')
+    TextInput({text:this.connectionFilter,placeholder:'搜索域名、地址、出站或规则'}).onChange((value: string) => {this.connectionFilter=value;})
+    this.note({value:this.connectionViewMode==='recent'?`最近请求 ${(this.dashboard.recentRequests || []).length} 条（最多 500 条，含已结束连接）`:`活动连接 ${this.dashboard.connections.length}（最多显示最新 200 条）`})
+    if(this.connectionViewMode==='active'){
+     Button('关闭全部连接').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).width('100%').enabled(!this.controlBusy).onClick(() => {this.control('close-all');})
+    }
     ForEach(this.visibleConnections(),(item: ConnectionInfo) => {
      Column({space:8}) {
-      Text(item.domain || item.destination).fontSize(16).fontWeight(FontWeight.Medium).width('100%').onClick(() => {this.expandedConnection=this.expandedConnection===item.id?'':item.id;})
-      this.note({value:`${item.network} · ${item.outbound} · ↑ ${bytesLabel(item.upload)} ↓ ${bytesLabel(item.download)}`})
-      if(this.expandedConnection===item.id){this.note({value:`源：${item.source}\n目标：${item.destination}\n规则：${item.rule || '默认路由'}\n建立：${new Date(item.createdAt).toLocaleString()}`})}
-      Button('关闭此连接').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('close','','',item.id);})
+      Row({space:8}) {
+       Text(item.domain || item.destination).fontSize(16).fontWeight(FontWeight.Medium).layoutWeight(1).onClick(() => {this.expandedConnection=this.expandedConnection===item.id?'':item.id;})
+       Text((item.status || 'active')==='closed'?'已结束':'活跃').fontSize(11).fontColor((item.status || 'active')==='closed'?BRAND.muted:BRAND.onAccent).backgroundColor((item.status || 'active')==='closed'?BRAND.soft:BRAND.cyan).borderRadius(10).padding({left:8,right:8,top:3,bottom:3})
+      }.width('100%')
+      this.note({value:`${item.network} · ${item.outbound} · 耗时 ${durationLabel(this.connectionDurationMs(item))} · ↑ ${bytesLabel(item.upload)} ↓ ${bytesLabel(item.download)}`})
+      if(this.expandedConnection===item.id){this.note({value:`源：${item.source}\n目标：${item.destination}\n规则：${item.rule || '默认路由'}\n建立：${new Date(item.createdAt).toLocaleString()}${item.closedAt?`\n结束：${new Date(item.closedAt).toLocaleString()}`:''}`})}
+      if((item.status || 'active')!=='closed'){
+       Button('关闭此连接').backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).fontSize(12).enabled(!this.controlBusy).onClick(() => {this.control('close','','',item.id);})
+      }
      }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
-    },(item: ConnectionInfo): string => `${item.id}-${item.upload}-${item.download}`)
+    },(item: ConnectionInfo): string => `${this.connectionViewMode}-${item.id}-${item.status || 'active'}-${item.upload}-${item.download}-${item.durationMs || 0}`)
    }
   }.padding(22).width('100%').constraintSize({maxWidth:760}).alignItems(HorizontalAlign.Start)
  }
@@ -606,6 +818,8 @@ struct Index {
      this.note({value:'默认接管所有应用。仅指定或排除模式会改变系统引流范围，下次连接生效；应用内分流继续遵循原配置。'})
     }
     Row(){Text('网络切换或掉线后自动重连').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoReconnect}).onChange((value: boolean) => {this.settings.autoReconnect=value;this.saveOptions();})}.width('100%')
+    Row(){Text('切网保留 TUN 防泄漏（黑洞保护）').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.blackholeOnSwitch}).onChange((value: boolean) => {this.settings.blackholeOnSwitch=value;this.saveOptions();})}.width('100%')
+    this.note({value:'切网或短暂断网时保留 TUN（最长 60 秒）并优先无损热切换，防止明文流量直连泄漏。'})
     Row(){Text('打开 App 时自动连接').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.autoConnect}).onChange((value: boolean) => {this.settings.autoConnect=value;this.saveOptions();})}.width('100%')
     Row(){Text('指定 Wi-Fi 暂停 VPN').layoutWeight(1);Toggle({type:ToggleType.Switch,isOn:this.settings.onDemand}).onChange((value: boolean) => {this.settings.onDemand=value;this.saveOptions();})}.width('100%')
     if(this.settings.onDemand){
@@ -613,6 +827,10 @@ struct Index {
      Button('保存 Wi-Fi 规则').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {try {this.settings.bypassWifi=parseWifiNames(this.wifiRulesText);this.wifiRulesText=this.settings.bypassWifi.join('\n');this.saveOptions();} catch(_error) {this.message='未保存，请填写有效 Wi-Fi 名称（每行一个，最多 128 个，名称最多 32 字节）';}})
      this.note({value:'服务运行时进入这些 Wi-Fi 会暂停隧道，离开后恢复；系统结束服务后，需要重新打开 App。'})
     }
+    Text('SSID 策略联动').fontSize(15).fontWeight(FontWeight.Medium).fontColor(BRAND.text).width('100%')
+    TextArea({text:this.ssidPoliciesText,placeholder:'每行一条，例如：\nHomeWiFi = mode:direct\nHomeWiFi = group:Proxy:DIRECT\nOfficeWiFi = pause'}).height(100).onChange((value: string) => {this.ssidPoliciesText=value;})
+    Button('保存 SSID 策略').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.saveSsidPolicies();})
+    this.note({value:'连接指定 Wi-Fi 时自动暂停隧道、切换出站模式或切换策略组节点。'})
     this.note({value:this.status.wifiConditionStatus || '连接时读取底层网络的 Wi-Fi 条件。'})
     this.note({value:'导入配置的 wifi_ssid 和网络类型条件参与内核分流及 DNS 规则；暂停列表优先停止整个隧道。Wi-Fi 名称不可读时不沿用旧名称；暂不支持真实 BSSID 条件。'})
     this.note({value:'桌面入口：长按 App 图标使用连接、断开或总览；添加“VPN 快捷入口”服务卡片可直接打开并执行。首次连接仍需系统授权。'})
@@ -626,6 +844,25 @@ struct Index {
     if(this.dashboard.modes.length>0){
      this.note({value:`路由模式：${this.dashboard.mode}`})
      ForEach(this.dashboard.modes,(mode: string) => {Button(mode).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').enabled(this.status.phase==='running' && !this.controlBusy && mode!==this.dashboard.mode).onClick(() => {this.control('mode','','','',mode);})},(mode: string): string => mode)
+    }
+   }.padding(20).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
+   Column({space:14}) {
+    Row(){
+     Text('本地模块覆写（Local Overrides）').fontSize(16).fontWeight(FontWeight.Medium).fontColor(BRAND.text).layoutWeight(1)
+     Toggle({type:ToggleType.Switch,isOn:this.localOverrides.enabled}).onChange((value: boolean) => {if(value!==this.localOverrides.enabled){this.toggleLocalOverridesEnabled(value);}})
+    }.width('100%')
+    this.note({value:'不修改原始订阅，重连后生效。可置顶直连/代理/拒绝域名及静态 Host 映射。'})
+    Button(this.overridesExpanded?'收起覆写规则':'编辑覆写规则').backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.overridesExpanded=!this.overridesExpanded;})
+    if(this.overridesExpanded){
+     Text('置顶直连域名').fontSize(13).fontColor(BRAND.text).width('100%')
+     TextArea({text:this.overrideDirectText,placeholder:'每行一个域名，例如 internal.company.com'}).height(80).onChange((value: string) => {this.overrideDirectText=value;})
+     Text('置顶代理域名').fontSize(13).fontColor(BRAND.text).width('100%')
+     TextArea({text:this.overrideProxyText,placeholder:'每行一个域名，例如 api.example.com'}).height(80).onChange((value: string) => {this.overrideProxyText=value;})
+     Text('置顶拒绝域名').fontSize(13).fontColor(BRAND.text).width('100%')
+     TextArea({text:this.overrideRejectText,placeholder:'每行一个域名，例如 ads.example.com'}).height(80).onChange((value: string) => {this.overrideRejectText=value;})
+     Text('静态 Host 映射（domain = ip）').fontSize(13).fontColor(BRAND.text).width('100%')
+     TextArea({text:this.overrideHostsText,placeholder:'每行一条，例如 nas.home = 192.168.1.10'}).height(90).onChange((value: string) => {this.overrideHostsText=value;})
+     Button('保存本地覆写').backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).width('100%').onClick(() => {this.saveLocalOverridesForm();})
     }
    }.padding(20).width('100%').backgroundColor(BRAND.surface).borderRadius(20).border({width:1,color:BRAND.line})
    this.note({value:`熊盒 VPN 0.7 · ${this.coreVersion}`})

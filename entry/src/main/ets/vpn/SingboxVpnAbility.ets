@@ -4,7 +4,7 @@ import { Want } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import bridge from 'libsingboxbridge.so';
-import { PhysicalNetworkState, observeWifi, wifiPauseDecision } from '../common/WifiConditions';
+import { PhysicalNetworkState, SsidPolicyRule, SsidPolicyMatch, observeWifi, wifiPauseDecision, evaluateSsidPolicy } from '../common/WifiConditions';
 import { loadSettings } from '../common/ProfileStore';
 import { applyVpnScope, loadVpnScope } from '../common/VpnScope';
 import { ControlRequest, ControlReply, ControlResult } from '../common/Control';
@@ -25,6 +25,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  private lastControlId: string = '';
  private lastSnapshotAt: number = 0;
  private bypassCurrentWifi: boolean = false;
+ private pendingSsidPolicy?: SsidPolicyRule;
+ private lastAppliedSsidPolicy: string = '';
  private networkState: PhysicalNetworkState = { type: 'other', ssid: '' };
  private lastSentNetwork: string = '';
  private lastStatusWrite: number = 0;
@@ -155,7 +157,13 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
     const settings = loadSettings(this.context.filesDir);
     const type: string = caps.bearerTypes.includes(connection.NetBearType.BEARER_WIFI) ? 'wifi' : caps.bearerTypes.includes(connection.NetBearType.BEARER_CELLULAR) ? 'cellular' : 'other';
     const observation = await observeWifi(type);
-    this.bypassCurrentWifi = wifiPauseDecision(settings.onDemand, settings.bypassWifi, observation, this.bypassCurrentWifi, this.physicalNetId === handle.netId);
+    const sameNetwork: boolean = this.physicalNetId === handle.netId;
+    const policies: SsidPolicyRule[] = settings.ssidPolicies || [];
+    const policyMatch: SsidPolicyMatch = policies.length > 0 ? evaluateSsidPolicy(policies, observation) : { matched: false };
+    this.pendingSsidPolicy = policyMatch.matched ? policyMatch.rule : undefined;
+    const pauseByList: boolean = wifiPauseDecision(settings.onDemand, settings.bypassWifi, observation, this.bypassCurrentWifi, sameNetwork);
+    const pauseByPolicy: boolean = (policyMatch.matched && policyMatch.rule !== undefined && policyMatch.rule.action === 'pause') || (!observation.known && type === 'wifi' && sameNetwork && this.bypassCurrentWifi && policies.some((r: SsidPolicyRule): boolean => r.action === 'pause'));
+    this.bypassCurrentWifi = pauseByList || pauseByPolicy;
     this.networkState = observation.state;
     this.status.wifiConditionStatus = type === 'wifi' ? (observation.known ? 'Wi-Fi 条件可用（SSID）' : 'Wi-Fi 名称暂不可读；已清除旧名称，同网暂停状态保持') : '当前使用非 Wi-Fi 网络';
     this.physicalNetId = handle.netId;
@@ -198,6 +206,30 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
   }
   throw new Error('系统尚未建立 IPv4/IPv6 两条默认路由，已中止连接');
+ }
+ private async applySsidPolicy(): Promise<void> {
+  const rule: SsidPolicyRule | undefined = this.pendingSsidPolicy;
+  if (!rule || rule.action === 'pause') {
+   this.lastAppliedSsidPolicy = '';
+   return;
+  }
+  if (rule.action === 'mode' && rule.mode && rule.mode.length > 0) {
+   const key: string = `${rule.ssid}|mode|${rule.mode}`;
+   if (key === this.lastAppliedSsidPolicy) { return; }
+   const req: ModeControlRequest = { action: 'mode', mode: rule.mode };
+   try {
+    const reply: CoreResponse = JSON.parse(await bridge.control(JSON.stringify(req))) as CoreResponse;
+    if (reply.ok) { this.lastAppliedSsidPolicy = key; }
+   } catch (_error) {}
+  } else if (rule.action === 'group' && rule.group && rule.group.length > 0 && rule.outbound && rule.outbound.length > 0) {
+   const key: string = `${rule.ssid}|group|${rule.group}|${rule.outbound}`;
+   if (key === this.lastAppliedSsidPolicy) { return; }
+   const req: SelectControlRequest = { action: 'select', group: rule.group, outbound: rule.outbound };
+   try {
+    const reply: CoreResponse = JSON.parse(await bridge.control(JSON.stringify(req))) as CoreResponse;
+    if (reply.ok) { this.lastAppliedSsidPolicy = key; }
+   } catch (_error) {}
+  }
  }
  private async trySoftHandover(name: string): Promise<boolean> {
   try {
@@ -256,9 +288,12 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    const result: CoreResponse = JSON.parse(await bridge.start(config, fd, this.context.filesDir, this.status.physicalInterface, this.status.tunName, this.physicalNetId, network)) as CoreResponse;
    if (!result.ok) { if (result.errorCode?.startsWith('wg-')) { startupHint = result.message; } throw new Error('内核启动未完成'); }
    this.lastSentNetwork = network;
+   this.lastAppliedSsidPolicy = '';
    this.clockJump.reset(Date.now());
    this.selfHeal.reset();
    writePrivate(`${this.context.filesDir}/running-profile.json`, config);
+   this.requireAlive();
+   await this.applySsidPolicy();
    this.requireAlive();
    this.registerNetConnection();
    this.publish('running', SingboxVpnAbility.RUNNING_MESSAGE);
@@ -291,11 +326,13 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    }
    const handedOver: boolean = await this.trySoftHandover(name);
    if (this.destroyed) { return; }
-   if (!handedOver) {
-    await this.cleanup();
-    if (this.destroyed) { return; }
-    await this.recoverNetwork('网络已切换');
+   if (handedOver) {
+    await this.applySsidPolicy();
+    return;
    }
+   await this.cleanup();
+   if (this.destroyed) { return; }
+   await this.recoverNetwork('网络已切换');
   } catch (error) {
    if (this.destroyed) { return; }
    const noPhysicalNet: boolean = error instanceof Error && error.message === '没有可用的物理网络';
@@ -346,7 +383,9 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    if (name !== this.status.physicalInterface || previousNetId !== this.physicalNetId) {
     const handedOver: boolean = await this.trySoftHandover(name);
     if (this.destroyed) { return; }
-    if (!handedOver) {
+    if (handedOver) {
+     await this.applySsidPolicy();
+    } else {
      await this.cleanup();
      if (this.destroyed) { return; }
      await this.recoverNetwork('网络已切换');
@@ -358,6 +397,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
      if (!reply.ok) { throw new Error('Wi-Fi 条件同步未完成'); }
      this.lastSentNetwork = network;
     }
+    await this.applySsidPolicy();
+    if (this.destroyed) { return; }
     const stats: CoreStats = JSON.parse(await bridge.stats()) as CoreStats;
     if (this.destroyed) { return; }
     this.status.uplink = stats.uplink; this.status.downlink = stats.downlink; this.status.ipv4Flows = stats.ipv4Flows; this.status.ipv6Flows = stats.ipv6Flows;
@@ -413,11 +454,12 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    await this.startVpn();
    reply = { ok: this.status.phase === 'running', message: this.status.phase === 'running' ? '已重新连接' : '正在等待网络恢复' };
   } else {
-   const nativeRequest: NativeControlRequest = { action: request.action, group: request.group || '', outbound: request.outbound || '', id: request.connectionId || '', mode: request.mode || '' };
+   const nativeRequest: NativeControlRequest = { action: request.action, group: request.group || '', outbound: request.outbound || '', id: request.connectionId || '', mode: request.mode || '', host: request.host || '' };
    reply = JSON.parse(await bridge.control(JSON.stringify(nativeRequest))) as ControlReply;
   }
   if (this.destroyed) { return true; }
   const result: ControlResult = { id: request.id, ok: reply.ok, message: reply.message };
+  if (reply.diagnosis) { result.diagnosis = reply.diagnosis; }
   writePrivate(`${this.context.filesDir}/control-result.json`, JSON.stringify(result));
   this.lastSnapshotAt = 0;
   return request.action === 'reconnect';
@@ -438,6 +480,7 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  }
  private async cleanup(): Promise<void> {
   this.blackholeSince = 0;
+  this.lastAppliedSsidPolicy = '';
   this.unregisterNetConnection();
   if (this.networkTimer !== -1) { clearInterval(this.networkTimer); this.networkTimer = -1; }
   try { await bridge.stop(); } catch (_error) {}
@@ -445,6 +488,8 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
  }
 }
 
-interface NativeControlRequest { action: string; group: string; outbound: string; id: string; mode: string; }
+interface NativeControlRequest { action: string; group: string; outbound: string; id: string; mode: string; host: string; }
+interface ModeControlRequest { action: string; mode: string; }
+interface SelectControlRequest { action: string; group: string; outbound: string; }
 interface UpdatePhysicalNetRequest { action: string; interfaceName: string; netId: number; network: PhysicalNetworkState; }
 interface DashboardDemand { updatedAt: number; }

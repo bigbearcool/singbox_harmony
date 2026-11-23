@@ -82,7 +82,7 @@ globalThis.__aoWifiEnv = {
   }
 };
 const wifiSource = fs.readFileSync(new URL('../entry/src/main/ets/common/WifiConditions.ets', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
-const { observeWifi, wifiPauseDecision } = await import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes('const {util,wifiManager}=globalThis.__aoWifiEnv;\n' + wifiSource, { mode: 'strip' })).toString('base64'));
+const { observeWifi, wifiPauseDecision, evaluateSsidPolicy } = await import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes('const {util,wifiManager}=globalThis.__aoWifiEnv;\n' + wifiSource, { mode: 'strip' })).toString('base64'));
 
 globalThis.__aoEnv = { readPrivate, writePrivate };
 const alwaysOnSource = fs.readFileSync(new URL('../entry/src/main/ets/common/AlwaysOn.ets', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
@@ -179,6 +179,20 @@ const bridge = {
       if (env.handoverThrows) throw new Error('bridge error');
       if (env.handoverFails) return '{"ok":false,"message":"handover unsupported"}';
     }
+    if (parsed.action === 'diagnose-host') {
+      return JSON.stringify({
+        ok: true,
+        message: `${parsed.host} 解析完成`,
+        diagnosis: {
+          host: parsed.host,
+          ipv4: ['1.1.1.1'],
+          ipv6: ['2606:4700:4700::1111'],
+          latencyMs: 24,
+          mode: 'rule',
+          summary: `${parsed.host} -> 1.1.1.1 (24 ms)`
+        }
+      });
+    }
     return '{"ok":true}';
   },
   start: async () => {
@@ -205,6 +219,7 @@ const bridge = {
 globalThis.__aoVpnEnv = {
   observeWifi,
   wifiPauseDecision,
+  evaluateSsidPolicy,
   ClockJumpDetector,
   SelfHealTracker,
   HandoverDebouncer,
@@ -230,7 +245,8 @@ globalThis.__aoVpnEnv = {
     const s = {
       autoReconnect: env.autoReconnect,
       onDemand: false,
-      bypassWifi: []
+      bypassWifi: [],
+      ssidPolicies: env.ssidPolicies || []
     };
     if (env.blackholeOnSwitch !== undefined) {
       s.blackholeOnSwitch = env.blackholeOnSwitch;
@@ -247,7 +263,7 @@ globalThis.__aoVpnEnv = {
 
 const vpnSource = fs.readFileSync(new URL('../entry/src/main/ets/vpn/SingboxVpnAbility.ets', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
 const { default: SingboxVpnAbility } = await import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes(
-  'const {observeWifi,wifiPauseDecision,ClockJumpDetector,SelfHealTracker,HandoverDebouncer,loadDesiredState,saveDesiredState,recordInterruption,recordHandover,recordSelfHeal,applyVpnScope,loadVpnScope,VpnExtensionAbility,connection,bridge,vpnExtension,loadSettings,BUNDLE_NAME,VPN_ABILITY,readPrivate,writePrivate,initialStatus,hilog}=globalThis.__aoVpnEnv;\n' + vpnSource,
+  'const {observeWifi,wifiPauseDecision,evaluateSsidPolicy,ClockJumpDetector,SelfHealTracker,HandoverDebouncer,loadDesiredState,saveDesiredState,recordInterruption,recordHandover,recordSelfHeal,applyVpnScope,loadVpnScope,VpnExtensionAbility,connection,bridge,vpnExtension,loadSettings,BUNDLE_NAME,VPN_ABILITY,readPrivate,writePrivate,initialStatus,hilog}=globalThis.__aoVpnEnv;\n' + vpnSource,
   { mode: 'strip' }
 )).toString('base64'));
 
@@ -597,6 +613,77 @@ test('SingboxVpnAbility: NetConnection events debounce handover, 15s background 
   assert.equal(env.netConnUnregisterCalls, 1);
   assert.equal(netCon.unregistered, true);
   assert.equal(intervals.size, 0);
+});
+
+test('SingboxVpnAbility: SSID policy mode/group linkage with deduplication and diagnose-host passthrough', async () => {
+  resetEnv({
+    ssid: 'HomeWiFi',
+    ssidPolicies: [
+      { ssid: 'HomeWiFi', action: 'mode', mode: 'direct' },
+      { ssid: 'LabWiFi', action: 'group', group: 'Proxy', outbound: 'DIRECT' },
+      { ssid: 'PauseWiFi', action: 'pause' }
+    ]
+  });
+  const ability = new SingboxVpnAbility();
+  ability.onCreate({});
+  await ability.task;
+  assert.equal(ability.status.phase, 'running');
+  assert.deepEqual(
+    env.controls.filter((c) => c.action === 'mode'),
+    [{ action: 'mode', mode: 'direct' }]
+  );
+
+  // Another tick on the same HomeWiFi must NOT resend mode
+  advanceTime(16000);
+  ability.tick();
+  await ability.task;
+  assert.equal(env.controls.filter((c) => c.action === 'mode').length, 1);
+
+  // Switch Wi-Fi SSID to LabWiFi -> triggers group select once
+  env.ssid = 'LabWiFi';
+  advanceTime(16000);
+  ability.tick();
+  await ability.task;
+  assert.deepEqual(
+    env.controls.filter((c) => c.action === 'select'),
+    [{ action: 'select', group: 'Proxy', outbound: 'DIRECT' }]
+  );
+
+  // Repeat tick on LabWiFi -> deduplicated
+  advanceTime(16000);
+  ability.tick();
+  await ability.task;
+  assert.equal(env.controls.filter((c) => c.action === 'select').length, 1);
+
+  // diagnose-host control request passes host to bridge and returns diagnosis in control-result.json
+  files.set('/test/control-request.json', JSON.stringify({
+    id: 'diag-1',
+    createdAt: fakeNow,
+    action: 'diagnose-host',
+    host: 'example.com'
+  }));
+  ability.tick();
+  await ability.task;
+  const diagReq = env.controls.find((c) => c.action === 'diagnose-host');
+  assert.ok(diagReq, 'expected diagnose-host control call');
+  assert.equal(diagReq.host, 'example.com');
+  const diagResult = JSON.parse(files.get('/test/control-result.json'));
+  assert.equal(diagResult.id, 'diag-1');
+  assert.equal(diagResult.ok, true);
+  assert.equal(diagResult.diagnosis.host, 'example.com');
+  assert.deepEqual(diagResult.diagnosis.ipv4, ['1.1.1.1']);
+  assert.equal(diagResult.diagnosis.latencyMs, 24);
+  assert.equal(diagResult.diagnosis.mode, 'rule');
+
+  // Switch to PauseWiFi -> pauses VPN
+  env.ssid = 'PauseWiFi';
+  advanceTime(16000);
+  ability.tick();
+  await ability.task;
+  assert.equal(ability.status.phase, 'paused');
+
+  ability.onDestroy();
+  await ability.task;
 });
 
 test.after(() => {
