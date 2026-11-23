@@ -116,11 +116,11 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
    if (this.status.phase !== 'error') { this.publish('stopped', 'VPN 已停止'); }
   });
  }
- private publish(phase: string, message: string): void {
+ private publish(phase: string, message: string, force: boolean = false): void {
   const changed: boolean = this.status.phase !== phase || this.status.message !== message;
   this.status.phase = phase;
   this.status.message = message;
-  if (!changed && Date.now() - this.lastStatusWrite < (this.uiActive() ? 1000 : 5000)) { return; }
+  if (!force && !changed && Date.now() - this.lastStatusWrite < (this.uiActive() ? 1000 : 5000)) { return; }
   this.status.updatedAt = Date.now();
   this.lastStatusWrite = this.status.updatedAt;
   writePrivate(`${this.context.filesDir}/vpn-status.json`, JSON.stringify(this.status));
@@ -336,7 +336,10 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   } catch (error) {
    if (this.destroyed) { return; }
    const noPhysicalNet: boolean = error instanceof Error && error.message === '没有可用的物理网络';
-   if (noPhysicalNet && Date.now() - this.blackholeSince < SingboxVpnAbility.BLACKHOLE_MAX_MS) { return; }
+   if (noPhysicalNet && Date.now() - this.blackholeSince < SingboxVpnAbility.BLACKHOLE_MAX_MS) {
+    this.publish('reconnecting', '网络暂时中断，已保持 TUN 防泄漏，等待恢复');
+    return;
+   }
    this.blackholeSince = 0;
    await this.cleanup();
    if (this.destroyed) { return; }
@@ -449,7 +452,21 @@ export default class SingboxVpnAbility extends VpnExtensionAbility {
   this.lastControlId = request.id;
   if (Date.now() - request.createdAt > 6000 || request.createdAt > Date.now() + 1000) { return false; }
   let reply: ControlReply;
-  if (request.action === 'reconnect') {
+  if (request.action === 'ping') {
+   if (this.status.phase === 'running') {
+    try {
+     const stats: CoreStats = JSON.parse(await bridge.stats()) as CoreStats;
+     if (!this.destroyed) {
+      this.status.uplink = stats.uplink; this.status.downlink = stats.downlink;
+      this.status.ipv4Flows = stats.ipv4Flows; this.status.ipv6Flows = stats.ipv6Flows;
+      this.status.bindSuccess = stats.bindSuccess; this.status.bindFailure = stats.bindFailure;
+      this.status.lastBindError = stats.lastBindError; this.status.dnsError = stats.dnsError;
+     }
+    } catch (_error) {}
+   }
+   if (!this.destroyed) { this.publish(this.status.phase, this.status.message, true); }
+   reply = { ok: true, message: 'ok' };
+  } else if (request.action === 'reconnect') {
    await this.cleanup(); if (this.destroyed) { return true; }
    await this.startVpn();
    reply = { ok: this.status.phase === 'running', message: this.status.phase === 'running' ? '已重新连接' : '正在等待网络恢复' };

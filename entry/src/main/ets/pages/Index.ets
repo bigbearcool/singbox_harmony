@@ -131,6 +131,8 @@ struct Index {
  private lastLibraryRead: number=0;
  private healthChecking: boolean=false;
  private lastHealthCheck: number=0;
+ private foregroundSince: number=0;
+ private lastPingWrite: number=0;
  @State private applicationScope: VpnScope=defaultVpnScope();
  @State private applicationScopeText: string='';
  @State private applicationScopeExpanded: boolean=false;
@@ -204,6 +206,16 @@ struct Index {
   try {
    const latest: VpnStatus=JSON.parse(readPrivate(`${this.context.filesDir}/vpn-status.json`)) as VpnStatus;
    if(vpnStatusExpired(latest)){
+    // Actively wake the VPN extension to flush a fresh heartbeat before declaring it stale.
+    try {writePrivate(`${this.context.filesDir}/ui-demand.json`,JSON.stringify({updatedAt:Date.now()}));this.lastDemandWrite=Date.now();} catch(_error) {}
+    if(Date.now()-this.lastPingWrite>=2500){
+     this.lastPingWrite=Date.now();
+     try {writePrivate(`${this.context.filesDir}/control-request.json`,JSON.stringify({id:util.generateRandomUUID(),createdAt:Date.now(),action:'ping'}));} catch(_error) {}
+    }
+    if(Date.now()-this.foregroundSince<4000){
+     if(this.status.phase==='stopped'){this.status=latest;}
+     return;
+    }
     this.status=assessExpiredVpnStatus(latest,undefined);
     if(!this.healthChecking && Date.now()-this.lastHealthCheck>=5000){this.verifyExpiredStatus(latest);}
     return;
@@ -479,6 +491,7 @@ struct Index {
  }
  private updateForeground(): void {
   if(!this.appForeground || !this.pageVisible){backgroundSession.onBackground();if(this.timer!==-1){clearInterval(this.timer);this.timer=-1;}this.automaticUpdate?.cancel();return;}
+  this.foregroundSince=Date.now();
   backgroundSession.onForeground();
   this.readStatus();
   if(this.timer===-1){this.timer=setInterval(() => {this.readStatus();this.autoUpdateProfiles();},1000);}
