@@ -11,7 +11,7 @@ import { pushFormStatus } from '../common/FormSync';
 import { ScheduleStatus, readScheduleStatus, syncSubscriptionSchedule } from '../common/SubscriptionSchedule';
 import { UpdateReport, readUpdateReport, runDueProfileUpdates } from '../common/SubscriptionUpdates';
 import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
-import { VpnScope, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
+import { VpnScope, AppPresetCategory, AppPresetItem, APP_SCOPE_PRESETS, toggleScopePackage, defaultVpnScope, loadVpnScope, saveVpnScope } from '../common/VpnScope';
 import { usableSsid, SsidPolicyRule, parseWifiNames, parseSsidPolicyLines, formatSsidPolicyLines } from '../common/WifiConditions';
 import { DesiredVpnState, DesiredVpnMode, defaultDesiredState, loadDesiredState, saveDesiredState } from '../common/AlwaysOn';
 import { HostOverride, LocalOverrides, defaultLocalOverrides, loadLocalOverrides, saveLocalOverrides, parseDomainList, parseCidrList, parseHostLines, formatHostLines } from '../common/LocalOverrides';
@@ -19,8 +19,9 @@ import { validShortcutAction, runShortcutAction } from '../common/ShortcutAction
 import { BRAND, BEAR_THEME } from '../common/BrandTheme';
 import bridge from 'libsingboxbridge.so';
 import { BUNDLE_NAME, VPN_ABILITY, DIRECT_PROFILE, VpnStatus, CoreResponse, initialStatus, writePrivate, readPrivate } from '../common/Store';
-import { SavedProfile, ProfileLibrary, AppSettings, ProfileFetchCancellation, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, fetchProfile, refreshProfile } from '../common/ProfileStore';
-import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, WireGuardInfo, WireGuardPeer, HostDiagnosis, emptyDashboard, readDashboard, sendControl, diagnoseHost } from '../common/Control';
+import { SavedProfile, ProfileLibrary, AppSettings, ProfileFetchCancellation, FetchedProfile, defaultSettings, loadSettings, saveSettings, loadLibrary, setAutoUpdate, addProfile, readProfile, selectProfile, removeProfile, editProfile, renameProfile, fetchProfileWithMeta, refreshProfile } from '../common/ProfileStore';
+import { OutboundGroup, GroupItem, ConnectionInfo, DashboardData, WireGuardInfo, WireGuardPeer, HostDiagnosis, DeepProbeResult, TunnelView, emptyDashboard, readDashboard, sendControl, diagnoseHost, runDeepProbe, convertProfileText } from '../common/Control';
+import { TrafficSparkline } from '../components/TrafficSparkline';
 
 function bytesLabel(value: number): string {
  if(value>=1073741824){return `${(value/1073741824).toFixed(2)} GB`;}
@@ -37,6 +38,9 @@ function durationLabel(ms: number): string {
 }
 function emptyDiagnosis(): HostDiagnosis {
  return {host:'',ipv4:[],ipv6:[],latencyMs:0,summary:''};
+}
+function emptyDeepProbe(): DeepProbeResult {
+ return {natType:'unknown',summary:''};
 }
 function chunkPairs(items: GroupItem[]): GroupItem[][] {
  const rows: GroupItem[][]=[];
@@ -60,6 +64,12 @@ struct Index {
  @State private controlBusy: boolean=false;
  @State private probing: boolean=false;
  @State private probeResult: string='';
+ @State private deepProbing: boolean=false;
+ @State private hasDeepProbe: boolean=false;
+ @State private deepProbeResult: DeepProbeResult=emptyDeepProbe();
+ @State private refreshingPolicy: boolean=false;
+ @State private renamingProfileId: string='';
+ @State private renameDraft: string='';
  // 4-tab IA: 0=总览, 1=策略, 2=活动, 3=管理
  @State private activeTab: number=0;
  @State private activitySubTab: string='recent';
@@ -80,6 +90,8 @@ struct Index {
  @State private expandedConnection: string='';
  @State private uploadRate: number=0;
  @State private downloadRate: number=0;
+ @State private upHistory: number[]=[];
+ @State private downHistory: number[]=[];
  @State private wifiRulesText: string='';
  @State private ssidPoliciesText: string='';
  @State private desiredState: DesiredVpnState=defaultDesiredState();
@@ -118,6 +130,7 @@ struct Index {
  @StorageLink('windowSafeBottom') private windowSafeBottom: number=0;
  @StorageLink('windowSafeLeft') private windowSafeLeft: number=0;
  @StorageLink('windowSafeRight') private windowSafeRight: number=0;
+ @StorageLink('windowIsWide') private windowIsWide: boolean=false;
  @StorageLink('windowLayoutReady') private windowLayoutReady: boolean=false;
  @StorageLink('backgroundSessionStatus') private backgroundSessionStatus: string='后台保障未运行';
  @State private locationChanging: boolean=false;
@@ -143,6 +156,8 @@ struct Index {
  private lastTrafficTime: number=0;
  private lastUpload: number=0;
  private lastDownload: number=0;
+ private lastFormMode: string='';
+ private lastFormPushAt: number=0;
  private observer?: vpnExtension.VpnObserver;
  private timer: number=-1;
  private toastTimer: number=-1;
@@ -226,18 +241,39 @@ struct Index {
      this.uploadRate=this.lastTrafficTime>0?Math.max(0,((latest.uplink || 0)-this.lastUpload)/seconds):0;
      this.downloadRate=this.lastTrafficTime>0?Math.max(0,((latest.downlink || 0)-this.lastDownload)/seconds):0;
      this.lastTrafficTime=latest.updatedAt;this.lastUpload=latest.uplink || 0;this.lastDownload=latest.downlink || 0;
+     if(latest.phase==='running'){
+      const nextUp: number[]=this.upHistory.slice(-59);
+      nextUp.push(this.uploadRate);
+      this.upHistory=nextUp;
+      const nextDown: number[]=this.downHistory.slice(-59);
+      nextDown.push(this.downloadRate);
+      this.downHistory=nextDown;
+     }
     }
-    if(latest.phase!=='running'){this.uploadRate=0;this.downloadRate=0;}
+    if(latest.phase!=='running'){
+     this.uploadRate=0;this.downloadRate=0;
+     if(this.upHistory.length>0 || this.downHistory.length>0){this.upHistory=[];this.downHistory=[];}
+    }
     const cardChanged: boolean=latest.phase!==this.status.phase || (latest.networkType || '')!==(this.status.networkType || '');
     this.status=latest;
-    if(cardChanged){pushFormStatus(this.context.filesDir,latest);}
+    if(latest.phase==='running'){
+     writePrivate(`${this.context.filesDir}/dashboard-demand.json`,JSON.stringify({updatedAt:Date.now()}));
+     this.dashboard=readDashboard(this.context.filesDir);
+    }
+    const modeChanged: boolean=latest.phase==='running' && this.dashboard.mode!==this.lastFormMode;
+    const periodicCardSync: boolean=latest.phase==='running' && Date.now()-this.lastFormPushAt>=10000;
+    if(cardChanged || modeChanged || periodicCardSync){
+     pushFormStatus(this.context.filesDir,latest,this.dashboard.mode);
+     this.lastFormMode=this.dashboard.mode;
+     this.lastFormPushAt=Date.now();
+    }
     if(latest.phase==='running' && ['正在连接','正在重新连接'].includes(this.message)){this.showToast('');}
    }
   } catch(_error) {}
   if(this.waitingSince>0 && this.status.phase==='starting' && Date.now()-this.waitingSince>60000){
    this.status=initialStatus();this.status.message='等待授权超时，可重新连接';this.waitingSince=0;
   }
-  if(this.status.phase==='running'){
+  if(this.status.phase==='running' && this.dashboard.groups.length===0 && this.dashboard.modes.length===0){
    writePrivate(`${this.context.filesDir}/dashboard-demand.json`,JSON.stringify({updatedAt:Date.now()}));
    this.dashboard=readDashboard(this.context.filesDir);
   }
@@ -327,11 +363,12 @@ struct Index {
   await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
   await backgroundSession.stop();
   this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
-  writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));pushFormStatus(this.context.filesDir,this.status);this.showToast('已断开');
+  this.upHistory=[];this.downHistory=[];this.hasDeepProbe=false;this.lastFormMode='';
+  writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));pushFormStatus(this.context.filesDir,this.status,'');this.showToast('已断开');
  }
  private async toggle(automatic: boolean=false): Promise<void> {
   if(!automatic){this.allowAutomaticConnect=false;}
-  this.probeGeneration++;this.probeResult='';this.probing=false;this.busy=true;
+  this.probeGeneration++;this.probeResult='';this.probing=false;this.hasDeepProbe=false;this.deepProbing=false;this.busy=true;
   try {
    if(this.active()){
     await this.disconnectVpn();
@@ -392,6 +429,18 @@ struct Index {
   catch(_error) {if(generation===this.probeGeneration){this.probeResult='连接检查未完成';}}
   finally {if(timeout!==-1){clearTimeout(timeout);}if(generation===this.probeGeneration){this.probing=false;}}
  }
+ private async deepProbe(): Promise<void> {
+  if(this.deepProbing || this.status.phase!=='running'){return;}
+  this.deepProbing=true;
+  try {
+   this.deepProbeResult=await runDeepProbe(this.context.filesDir);
+   this.hasDeepProbe=true;
+  } catch(error) {
+   this.showToast(error instanceof Error?error.message:'深度体检未完成，请确认 VPN 处于连接状态');
+  } finally {
+   this.deepProbing=false;
+  }
+ }
  private async importFile(): Promise<void> {
   this.busy=true;
   try {
@@ -425,16 +474,43 @@ struct Index {
   } catch(_error) {this.showToast('导入链接无效');}
   this.pendingRemoteProfile='';
  }
+ private isRemoteLinkText(trimmed: string): boolean {
+  return /^https?:\/\//i.test(trimmed) || /^sing-box:\/\//i.test(trimmed);
+ }
+ private async convertAndImportText(raw: string): Promise<void> {
+  if(this.busy){return;}
+  this.busy=true;
+  try {
+   const converted: string=await convertProfileText(raw);
+   this.library=await addProfile(this.context.filesDir,this.library,this.editorName || '转换配置',converted);
+   this.editorVisible=false;this.importDrawerOpen=false;this.editorContent='';
+   this.showToast('节点链接 / Base64 已转换并导入');
+   this.syncUpdates();
+  } catch(error) {
+   this.showToast(error instanceof Error?error.message:'节点转换失败，请检查链接或 Base64 格式');
+  } finally {
+   this.busy=false;
+  }
+ }
  private acceptImportText(text: string): void {
   this.allowAutomaticConnect=false;this.activeTab=3;this.manageSubTab='profiles';this.importDrawerOpen=true;
-  if(text.trim().startsWith('{')){
+  const trimmed: string=text.trim();
+  if(trimmed.startsWith('{')){
    if(new util.TextEncoder().encodeInto(text).length>1048576){throw new Error('配置过大');}
    this.editingId='';this.editorContent=text;this.editorName='导入配置';this.editorVisible=true;
-  } else {
-   const draft: RemoteProfileDraft=parseProfileImportLink(text);
+   this.showToast(this.active()?'已填入导入草稿，请断开 VPN 后确认导入':'已填入导入草稿，请校验保存或下载后导入');
+  } else if(this.isRemoteLinkText(trimmed)){
+   const draft: RemoteProfileDraft=parseProfileImportLink(trimmed);
    this.remoteURL=draft.url;this.editorName=draft.name;this.editorVisible=false;
+   this.showToast(this.active()?'已填入导入草稿，请断开 VPN 后确认导入':'已填入导入草稿，请校验保存或下载后导入');
+  } else if(trimmed.length>0){
+   this.editingId='';this.editorContent=trimmed;this.editorName=this.editorName || '转换配置';this.editorVisible=true;
+   if(this.active()){
+    this.showToast('已识别节点链接 / Base64，请断开 VPN 后点击校验并保存');
+   } else {
+    this.convertAndImportText(trimmed);
+   }
   }
-  this.showToast(this.active()?'已填入导入草稿，请断开 VPN 后确认导入':'已填入导入草稿，请校验保存或下载后导入');
  }
  private async scanProfile(): Promise<void> {
   this.busy=true;
@@ -452,8 +528,9 @@ struct Index {
  private async importRemote(): Promise<void> {
   this.busy=true;
   try {
-   const content: string=await fetchProfile(this.remoteURL.trim());
-   this.library=await addProfile(this.context.filesDir,this.library,this.editorName || '远程配置',content,this.remoteURL.trim());
+   const url: string=this.remoteURL.trim();
+   const fetched: FetchedProfile=await fetchProfileWithMeta(url);
+   this.library=await addProfile(this.context.filesDir,this.library,this.editorName || '远程配置',fetched.content,url,fetched.userinfo);
    this.remoteURL='';this.importDrawerOpen=false;this.showToast('远程配置已导入');this.syncUpdates();
   } catch(_error) {this.showToast('下载或校验失败，原配置已保留');}
   finally {this.busy=false;}
@@ -461,11 +538,35 @@ struct Index {
  private async saveEditor(): Promise<void> {
   this.busy=true;
   try {
-   if(this.editingId){this.library=await editProfile(this.context.filesDir,this.library,this.editingId,this.editorName,this.editorContent);}
-   else {this.library=await addProfile(this.context.filesDir,this.library,this.editorName,this.editorContent);}
+   let content: string=this.editorContent;
+   const trimmed: string=content.trim();
+   if(trimmed.length>0 && !trimmed.startsWith('{') && !this.isRemoteLinkText(trimmed)){
+    content=await convertProfileText(trimmed);
+   }
+   if(this.editingId){this.library=await editProfile(this.context.filesDir,this.library,this.editingId,this.editorName,content);}
+   else {this.library=await addProfile(this.context.filesDir,this.library,this.editorName || '导入配置',content);}
    this.editorVisible=false;this.importDrawerOpen=false;this.editorContent='';this.showToast('配置已保存并通过内核校验');this.syncUpdates();
-  } catch(_error) {this.showToast('保存未完成，请检查 JSON 和协议字段；原配置已保留');}
+  } catch(_error) {this.showToast('保存未完成，请检查 JSON 或节点链接格式；原配置已保留');}
   finally {this.busy=false;}
+ }
+ private confirmRenameProfile(id: string): void {
+  try {
+   this.library=renameProfile(this.context.filesDir,this.library,id,this.renameDraft);
+   this.renamingProfileId='';
+   this.renameDraft='';
+   this.showToast('配置名称已更新');
+  } catch(error) {
+   this.showToast(error instanceof Error?error.message:'改名失败，名称应为 1 至 80 个字符');
+  }
+ }
+ private expiryLabel(expire: number): string {
+  if(!Number.isFinite(expire) || expire<=0){return '';}
+  const remainDays: number=Math.ceil((expire*1000-Date.now())/86400000);
+  if(remainDays<=0){return '已到期';}
+  return `剩余 ${remainDays} 天`;
+ }
+ private isExpired(expire: number): boolean {
+  return Number.isFinite(expire) && expire>0 && expire*1000<=Date.now();
  }
  private edit(record: SavedProfile): void {
   this.editingId=record.id;this.editorName=record.name;this.editorContent=readProfile(this.context.filesDir,record.id);this.editorVisible=true;this.importDrawerOpen=true;
@@ -520,6 +621,20 @@ struct Index {
  private saveApplicationScope(): void {
   try {this.applicationScope=saveVpnScope(this.context.filesDir,this.applicationScope.mode,this.applicationScopeText);this.applicationScopeText=this.applicationScope.applications.join('\n');this.showToast('应用范围已保存，下次连接生效');}
   catch(_error) {this.showToast('保存未完成，请填写 1 至 256 个有效包名，每行一个');}
+ }
+ private currentScopePackages(): string[] {
+  const result: string[]=[];
+  for(const raw of this.applicationScopeText.split(/\r?\n/)){
+   const name: string=raw.trim();
+   if(name.length>0 && !result.includes(name)){result.push(name);}
+  }
+  return result;
+ }
+ private togglePresetApp(bundleName: string): void {
+  const current: VpnScope={mode:this.applicationScope.mode,applications:this.currentScopePackages()};
+  const next: VpnScope=toggleScopePackage(current,bundleName);
+  this.applicationScope=next;
+  this.applicationScopeText=next.applications.join('\n');
  }
  private locationOptions(value: boolean): AppSettings {
   return {autoReconnect:this.settings.autoReconnect,autoConnect:this.settings.autoConnect,logLevel:this.settings.logLevel,onDemand:this.settings.onDemand,bypassWifi:this.settings.bypassWifi,locationAssist:value,backgroundUpdates:this.settings.backgroundUpdates,blackholeOnSwitch:this.settings.blackholeOnSwitch,ssidPolicies:this.settings.ssidPolicies};
@@ -758,6 +873,28 @@ struct Index {
   }
   return items;
  }
+ private quickAddDomainOverride(rawDomain: string,action: string): void {
+  try {
+   const parsed: string[]=parseDomainList(rawDomain);
+   if(parsed.length===0){this.showToast('域名格式不支持置顶覆写');return;}
+   const domain: string=parsed[0];
+   const next: LocalOverrides=this.cloneLocalOverrides(this.localOverrides);
+   next.enabled=true;
+   next.directDomains=next.directDomains.filter((d: string): boolean => d!==domain);
+   next.proxyDomains=next.proxyDomains.filter((d: string): boolean => d!==domain);
+   next.rejectDomains=next.rejectDomains.filter((d: string): boolean => d!==domain);
+   let label: string='拒绝';
+   if(action==='direct'){next.directDomains.push(domain);label='直连';}
+   else if(action==='proxy'){next.proxyDomains.push(domain);label='代理';}
+   else {next.rejectDomains.push(domain);label='拒绝';}
+   saveLocalOverrides(this.context.filesDir,next);
+   this.localOverrides=next;
+   this.syncOverrideTexts(next);
+   this.showToast(`已加入置顶[${label}]：${domain}（重连生效）`);
+  } catch(error) {
+   this.showToast(error instanceof Error?error.message:'加入置顶规则失败');
+  }
+ }
  private saveLocalOverridesForm(): void {
   try {
    const next: LocalOverrides={
@@ -798,15 +935,38 @@ struct Index {
   if(delay<400){return BRAND.amber;}
   return BRAND.coral;
  }
+ private primaryOutboundName(): string {
+  if(this.dashboard.groups.length===0){return '';}
+  return this.dashboard.groups[0].selected || '';
+ }
+ private primaryOutboundDelay(): number {
+  if(this.dashboard.groups.length===0){return 0;}
+  const group: OutboundGroup=this.dashboard.groups[0];
+  const found: GroupItem | undefined=group.items.find((it: GroupItem): boolean => it.tag===group.selected);
+  return found && found.urlTestDelay && found.urlTestDelay>0?found.urlTestDelay:0;
+ }
+ private async refreshPolicyDelays(): Promise<void> {
+  if(this.status.phase!=='running' || this.dashboard.groups.length===0){
+   this.refreshingPolicy=false;
+   return;
+  }
+  try {
+   await this.control('urltest','',this.dashboard.groups[0].tag);
+  } finally {
+   this.refreshingPolicy=false;
+  }
+ }
  private isGroupCollapsed(tag: string): boolean {
   return this.collapsedGroups.includes(tag);
  }
  private toggleGroupCollapse(tag: string): void {
-  if(this.collapsedGroups.includes(tag)){
-   this.collapsedGroups=this.collapsedGroups.filter((t: string): boolean => t!==tag);
-  } else {
-   this.collapsedGroups=[...this.collapsedGroups,tag];
-  }
+  animateTo({duration:200},() => {
+   if(this.collapsedGroups.includes(tag)){
+    this.collapsedGroups=this.collapsedGroups.filter((t: string): boolean => t!==tag);
+   } else {
+    this.collapsedGroups=[...this.collapsedGroups,tag];
+   }
+  });
  }
  private filteredGroupItems(items: GroupItem[]): GroupItem[] {
   const q: string=this.nodeFilter.trim().toLowerCase();
@@ -874,7 +1034,7 @@ struct Index {
     Column({space:2}) {
      Row({space:6}) {
       Text('熊盒 VPN').fontSize(19).fontWeight(FontWeight.Bold).fontColor(BRAND.text)
-      Text('0.8').fontSize(10).fontWeight(FontWeight.Bold).fontColor(BRAND.cyan).backgroundColor(BRAND.soft).borderRadius(6).padding({left:6,right:6,top:2,bottom:2})
+      Text('1.0').fontSize(10).fontWeight(FontWeight.Bold).fontColor(BRAND.cyan).backgroundColor(BRAND.soft).borderRadius(6).padding({left:6,right:6,top:2,bottom:2})
      }
      Text(this.coreVersion).fontSize(10).fontColor(BRAND.muted).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis})
     }.alignItems(HorizontalAlign.Start).layoutWeight(1)
@@ -897,6 +1057,29 @@ struct Index {
     }.width('100%')
 
     Text(this.status.phase==='running'?`${this.status.tunName || 'vpn-tun'} · MTU 1280 · ${this.status.message}`:this.status.message).fontSize(12).fontColor(BRAND.muted).width('100%').maxLines(2).textOverflow({overflow:TextOverflow.Ellipsis})
+
+    // Primary Active Outbound Node & Latency Pill
+    if(this.status.phase==='running' && this.primaryOutboundName().length>0){
+     Row({space:8}) {
+      Circle().width(7).height(7).fill(BRAND.cyan)
+      Text(this.dashboard.groups[0].tag).fontSize(11).fontColor(BRAND.muted)
+      Text(this.primaryOutboundName()).fontSize(13).fontWeight(FontWeight.Bold).fontColor(BRAND.text).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis}).layoutWeight(1)
+      Text(this.primaryOutboundDelay()>0?`${this.primaryOutboundDelay()}ms`:'--')
+       .fontSize(11)
+       .fontWeight(FontWeight.Bold)
+       .fontColor(this.delayColor(this.primaryOutboundDelay()))
+       .padding({left:7,right:7,top:2,bottom:2})
+       .backgroundColor(BRAND.background)
+       .borderRadius(7)
+      SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([BRAND.muted])
+     }
+     .width('100%')
+     .padding({left:12,right:10,top:9,bottom:9})
+     .backgroundColor(BRAND.elevated)
+     .borderRadius(13)
+     .border({width:1,color:BRAND.line})
+     .onClick(() => {this.activeTab=1;})
+    }
 
     // Surge-style Embedded Outbound Mode Segmented Bar
     if(this.status.phase==='running' && this.dashboard.modes.length>0){
@@ -942,6 +1125,7 @@ struct Index {
         Text(`活跃 ${this.dashboard.connections.length} · 最近 ${(this.dashboard.recentRequests || []).length}`).fontSize(13).fontWeight(FontWeight.Medium).fontColor(BRAND.text).width('100%')
        }.padding(11).layoutWeight(1).backgroundColor(BRAND.elevated).borderRadius(14).onClick(() => {this.activeTab=2;})
       }.width('100%')
+      TrafficSparkline({upSamples:this.upHistory,downSamples:this.downHistory})
      }.width('100%')
     }
 
@@ -980,6 +1164,14 @@ struct Index {
        }
       }.layoutWeight(1).height(38).borderRadius(12).backgroundColor(BRAND.soft).enabled(this.status.phase==='running' && !this.controlBusy).onClick(() => {this.control('reset-network');})
      }.width('100%')
+     if(this.status.phase==='running'){
+      Button() {
+       Row({space:6}) {
+        SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(13).fontColor([BRAND.cyan])
+        Text(this.deepProbing?'深度体检中…':'深度体检 · 直连/代理出口 IP & STUN NAT').fontSize(12).fontWeight(FontWeight.Medium).fontColor(BRAND.cyan)
+       }
+      }.width('100%').height(34).borderRadius(11).backgroundColor(BRAND.elevated).border({width:1,color:BRAND.line}).enabled(!this.deepProbing && !this.controlBusy).onClick(() => {this.deepProbe();})
+     }
     }
 
     if(this.probeResult){
@@ -987,6 +1179,21 @@ struct Index {
       Text(this.probeResult).fontSize(12).fontColor(BRAND.text).layoutWeight(1)
       Text('×').fontSize(16).fontColor(BRAND.muted).padding({left:6,right:4}).onClick(() => {this.probeResult='';})
      }.padding(12).width('100%').backgroundColor(BRAND.background).borderRadius(12).border({width:1,color:BRAND.line})
+    }
+
+    if(this.hasDeepProbe){
+     Column({space:6}) {
+      Row({space:8}) {
+       Text('深度体检结果').fontSize(12).fontWeight(FontWeight.Bold).fontColor(BRAND.cyan).layoutWeight(1)
+       Text('×').fontSize(16).fontColor(BRAND.muted).padding({left:6,right:4}).onClick(() => {this.hasDeepProbe=false;})
+      }.width('100%')
+      Text(`直连出口：${this.deepProbeResult.directIp || '--'}${this.deepProbeResult.directLatencyMs?` (${this.deepProbeResult.directLatencyMs}ms)`:''}`).fontSize(12).fontColor(BRAND.text).width('100%')
+      Text(`代理出口：${this.deepProbeResult.proxyIp || '--'}${this.deepProbeResult.proxyLatencyMs?` (${this.deepProbeResult.proxyLatencyMs}ms)`:''}`).fontSize(12).fontColor(BRAND.green).width('100%')
+      Text(`STUN NAT：${this.deepProbeResult.natType}${this.deepProbeResult.stunMapped?` · ${this.deepProbeResult.stunMapped}`:''}`).fontSize(12).fontColor(BRAND.amber).width('100%')
+      if(this.deepProbeResult.summary){
+       Text(this.deepProbeResult.summary).fontSize(11).fontColor(BRAND.muted).width('100%')
+      }
+     }.padding(12).width('100%').backgroundColor(BRAND.background).borderRadius(12).border({width:1,color:BRAND.cyan})
     }
    }.padding(18).width('100%').backgroundColor(BRAND.surface).borderRadius(22).border({width:1,color:this.status.phase==='running'?BRAND.cyan:BRAND.line})
 
@@ -1028,6 +1235,25 @@ struct Index {
       if(wg.lastProbe){Text(`家庭 DNS：${wg.lastProbe.summary}`).fontSize(12).fontColor(BRAND.muted).width('100%')}
      }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
     },(wg: WireGuardInfo): string => `${wg.tag}-${wg.peers.map((peer: WireGuardPeer): string => `${peer.lastHandshake}:${peer.txBytes}:${peer.rxBytes}`).join('|')}-${wg.lastProbe?.updatedAt || 0}`)
+   }
+
+   // Multi-Tunnel Cards (Tailscale / OpenVPN / OpenConnect)
+   if(this.status.phase==='running' && (this.dashboard.tunnels || []).length>0){
+    this.sectionHeader('多协议隧道 · TUNNELS')
+    ForEach(this.dashboard.tunnels || [],(tunnel: TunnelView) => {
+     Column({space:8}) {
+      Row({space:8}) {
+       Row({space:6}) {
+        Text(tunnel.tag).fontSize(15).fontWeight(FontWeight.Bold).fontColor(BRAND.text).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis})
+        Text(tunnel.type).fontSize(10).fontWeight(FontWeight.Medium).fontColor(BRAND.cyan).backgroundColor(BRAND.soft).borderRadius(6).padding({left:6,right:6,top:2,bottom:2})
+       }.layoutWeight(1)
+       Text(tunnel.active?'运行中':'未启动').fontSize(10).fontWeight(FontWeight.Medium).fontColor(tunnel.active?BRAND.green:BRAND.amber).backgroundColor(BRAND.elevated).borderRadius(8).padding({left:7,right:7,top:2,bottom:2})
+      }.width('100%')
+      if(tunnel.summary){
+       Text(tunnel.summary).fontSize(12).fontColor(BRAND.muted).width('100%')
+      }
+     }.padding(15).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
+    },(tunnel: TunnelView): string => `${tunnel.tag}-${tunnel.type}-${tunnel.active?1:0}-${tunnel.summary}`)
    }
 
    // Compact Status Footer when disconnected
@@ -1215,10 +1441,18 @@ struct Index {
         Text(`↑${bytesLabel(item.upload)} ↓${bytesLabel(item.download)}`).fontSize(11).fontColor(BRAND.muted).layoutWeight(1).textAlign(TextAlign.End)
        }.width('100%')
        if(this.expandedConnection===item.id){
-        Column({space:4}) {
+        Column({space:6}) {
          Text(`目标：${item.destination}`).fontSize(11).fontColor(BRAND.muted).width('100%')
          Text(`规则：${item.rule || '默认路由'}`).fontSize(11).fontColor(BRAND.text).width('100%')
          Text(`建立：${new Date(item.createdAt).toLocaleTimeString()}${item.closedAt?`  结束：${new Date(item.closedAt).toLocaleTimeString()}`:''}`).fontSize(11).fontColor(BRAND.muted).width('100%')
+         if(item.domain && item.domain.trim().length>0){
+          Row({space:6}) {
+           Button('直连').layoutWeight(1).height(30).fontSize(11).fontWeight(FontWeight.Bold).borderRadius(8).backgroundColor(BRAND.elevated).fontColor(BRAND.green).border({width:1,color:BRAND.green}).padding(0).onClick(() => {this.quickAddDomainOverride(item.domain,'direct');})
+           Button('代理').layoutWeight(1).height(30).fontSize(11).fontWeight(FontWeight.Bold).borderRadius(8).backgroundColor(BRAND.elevated).fontColor(BRAND.cyan).border({width:1,color:BRAND.cyan}).padding(0).onClick(() => {this.quickAddDomainOverride(item.domain,'proxy');})
+           Button('拒绝').layoutWeight(1).height(30).fontSize(11).fontWeight(FontWeight.Bold).borderRadius(8).backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).border({width:1,color:BRAND.dangerLine}).padding(0).onClick(() => {this.quickAddDomainOverride(item.domain,'reject');})
+           Button('查 DNS').layoutWeight(1).height(30).fontSize(11).fontWeight(FontWeight.Bold).borderRadius(8).backgroundColor(BRAND.soft).fontColor(BRAND.amber).border({width:1,color:BRAND.line}).padding(0).onClick(() => {this.diagnoseDrawerOpen=true;this.diagnoseInput=item.domain;this.runHostDiagnosis();})
+          }.width('100%')
+         }
          if((item.status || 'active')!=='closed'){
           Button('关闭此连接').height(30).fontSize(11).borderRadius(8).backgroundColor(BRAND.dangerSurface).fontColor(BRAND.coral).width('100%').enabled(!this.controlBusy).onClick(() => {this.control('close','','',item.id);})
          }
@@ -1285,10 +1519,11 @@ struct Index {
      }.width('100%')
      Row({space:8}) {
       Button('新建 JSON').layoutWeight(1).height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorContent='';this.editorVisible=true;})
-      Button('直连诊断预设').layoutWeight(1).height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorName='直连诊断';this.editorContent=DIRECT_PROFILE;this.editorVisible=true;})
+      Button('节点链接/Base64').layoutWeight(1).height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorName=this.editorName || '转换配置';this.editorContent='';this.editorVisible=true;})
+      Button('直连预设').layoutWeight(1).height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy && !this.active()).onClick(() => {this.editingId='';this.editorName='直连诊断';this.editorContent=DIRECT_PROFILE;this.editorVisible=true;})
      }.width('100%')
      if(this.editorVisible){
-      TextArea({text:this.editorContent,placeholder:'粘贴完整 sing-box JSON'}).height(220).fontFamily('monospace').fontSize(11).maxLength(1048576).backgroundColor(BRAND.background).borderRadius(10).enabled(!this.busy && !this.active()).onChange((value: string) => {this.editorContent=value;})
+      TextArea({text:this.editorContent,placeholder:'粘贴完整 sing-box JSON，或 vless:// / vmess:// / hy2:// / tuic:// / ss:// / trojan:// / Base64 节点文本'}).height(220).fontFamily('monospace').fontSize(11).maxLength(1048576).backgroundColor(BRAND.background).borderRadius(10).enabled(!this.busy && !this.active()).onChange((value: string) => {this.editorContent=value;})
       Row({space:8}) {
        Button('校验并保存').layoutWeight(1).height(38).borderRadius(10).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).enabled(!this.busy && !this.active()).onClick(() => {this.saveEditor();})
        Button('取消').height(38).borderRadius(10).padding({left:16,right:16}).backgroundColor(BRAND.soft).fontColor(BRAND.muted).enabled(!this.busy).onClick(() => {this.editorVisible=false;this.editorContent='';})
@@ -1322,11 +1557,40 @@ struct Index {
        Button('选用').height(30).fontSize(12).borderRadius(9).padding({left:12,right:12}).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).enabled(!this.busy && !this.active()).onClick(() => {this.choose(record);})
       }
      }.width('100%')
+     if(this.renamingProfileId===record.id){
+      Row({space:6}) {
+       TextInput({text:this.renameDraft,placeholder:'输入新配置名称'}).height(34).fontSize(12).layoutWeight(1).backgroundColor(BRAND.background).borderRadius(9).onChange((value: string) => {this.renameDraft=value;})
+       Button('确定').height(34).fontSize(12).borderRadius(9).padding({left:12,right:12}).backgroundColor(BRAND.cyan).fontColor(BRAND.onAccent).fontWeight(FontWeight.Bold).onClick(() => {this.confirmRenameProfile(record.id);})
+       Button('取消').height(34).fontSize(12).borderRadius(9).padding({left:10,right:10}).backgroundColor(BRAND.soft).fontColor(BRAND.muted).onClick(() => {this.renamingProfileId='';this.renameDraft='';})
+      }.width('100%')
+     }
+     if(record.userinfo && record.userinfo.total>0){
+      Column({space:5}) {
+       Row({space:6}) {
+        Text(`已用 ${bytesLabel((record.userinfo.upload || 0)+(record.userinfo.download || 0))} / ${bytesLabel(record.userinfo.total)} (${Math.min(100,Math.max(0,Math.round((((record.userinfo.upload || 0)+(record.userinfo.download || 0))/record.userinfo.total)*100)))}%)`)
+         .fontSize(11)
+         .fontColor(BRAND.text)
+         .layoutWeight(1)
+        if(this.expiryLabel(record.userinfo.expire)){
+         Text(this.expiryLabel(record.userinfo.expire))
+          .fontSize(11)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.isExpired(record.userinfo.expire)?BRAND.coral:BRAND.muted)
+        }
+       }.width('100%')
+       Progress({value:Math.min(100,Math.max(0,Math.round((((record.userinfo.upload || 0)+(record.userinfo.download || 0))/record.userinfo.total)*100))),total:100,type:ProgressType.Linear})
+        .width('100%')
+        .height(6)
+        .color((((record.userinfo.upload || 0)+(record.userinfo.download || 0))/record.userinfo.total)>=0.9?BRAND.coral:BRAND.cyan)
+        .backgroundColor(BRAND.background)
+      }.width('100%').padding({left:10,right:10,top:8,bottom:8}).backgroundColor(BRAND.elevated).borderRadius(10)
+     }
      Row({space:6}) {
       if(record.url){
        Button('更新').layoutWeight(1).height(32).fontSize(12).borderRadius(9).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy).onClick(() => {this.refresh(record);})
        Button('二维码').layoutWeight(1).height(32).fontSize(12).borderRadius(9).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy).onClick(() => {this.showProfileCode(record);})
       }
+      Button('改名').layoutWeight(1).height(32).fontSize(12).borderRadius(9).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy).onClick(() => {this.renamingProfileId=this.renamingProfileId===record.id?'':record.id;this.renameDraft=record.name;})
       Button('编辑').layoutWeight(1).height(32).fontSize(12).borderRadius(9).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy && !this.active()).onClick(() => {this.edit(record);})
       Button('导出').layoutWeight(1).height(32).fontSize(12).borderRadius(9).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).enabled(!this.busy).onClick(() => {this.exportDocument(`${record.name}.json`,readProfile(this.context.filesDir,record.id));})
       if(record.id!==this.library.selected){
@@ -1343,7 +1607,7 @@ struct Index {
       }.width('100%')
      }
     }.padding(15).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:record.id===this.library.selected?1.5:1,color:record.id===this.library.selected?BRAND.cyan:BRAND.line})
-   },(record: SavedProfile): string => `${record.id}-${record.name}-${record.updatedAt}-${record.autoUpdateHours}-${this.library.selected}`)
+   },(record: SavedProfile): string => `${record.id}-${record.name}-${record.updatedAt}-${record.autoUpdateHours}-${this.library.selected}-${this.renamingProfileId===record.id?1:0}-${record.userinfo?`${record.userinfo.upload}:${record.userinfo.download}:${record.userinfo.total}:${record.userinfo.expire}`:''}`)
   }.width('100%')
  }
 
@@ -1608,7 +1872,30 @@ struct Index {
     }.width('100%').onClick(() => {this.applicationScopeExpanded=!this.applicationScopeExpanded;})
     if(this.applicationScopeExpanded){
      Select([{value:'所有应用'},{value:'仅指定应用'},{value:'排除指定应用'}]).value(this.applicationScope.mode==='include'?'仅指定应用':this.applicationScope.mode==='exclude'?'排除指定应用':'所有应用').onSelect((index: number) => {this.applicationScope={mode:['all','include','exclude'][index],applications:this.applicationScope.applications};})
-     if(this.applicationScope.mode!=='all'){TextArea({text:this.applicationScopeText,placeholder:'每行一个应用包名，例如 com.example.app'}).height(96).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.applicationScopeText=value;})}
+     if(this.applicationScope.mode!=='all'){
+      Column({space:8}) {
+       ForEach(APP_SCOPE_PRESETS,(category: AppPresetCategory) => {
+        Column({space:5}) {
+         Text(category.title).fontSize(11).fontWeight(FontWeight.Medium).fontColor(BRAND.muted).width('100%')
+         Flex({wrap:FlexWrap.Wrap}) {
+          ForEach(category.items,(item: AppPresetItem) => {
+           Text(item.label)
+            .fontSize(11)
+            .fontWeight(this.currentScopePackages().includes(item.bundleName)?FontWeight.Bold:FontWeight.Medium)
+            .fontColor(this.currentScopePackages().includes(item.bundleName)?BRAND.onAccent:BRAND.cyan)
+            .backgroundColor(this.currentScopePackages().includes(item.bundleName)?BRAND.cyan:BRAND.elevated)
+            .borderRadius(12)
+            .border({width:1,color:this.currentScopePackages().includes(item.bundleName)?BRAND.cyan:BRAND.line})
+            .padding({left:10,right:10,top:5,bottom:5})
+            .margin({right:6,bottom:6})
+            .onClick(() => {this.togglePresetApp(item.bundleName);})
+          },(item: AppPresetItem): string => `${item.bundleName}-${this.currentScopePackages().includes(item.bundleName)?1:0}`)
+         }.width('100%')
+        }.width('100%').alignItems(HorizontalAlign.Start)
+       },(category: AppPresetCategory): string => `${category.title}-${this.applicationScopeText}`)
+      }.padding(10).width('100%').backgroundColor(BRAND.background).borderRadius(10).border({width:1,color:BRAND.line})
+      TextArea({text:this.applicationScopeText,placeholder:'每行一个应用包名，例如 com.example.app'}).height(96).backgroundColor(BRAND.background).borderRadius(10).onChange((value: string) => {this.applicationScopeText=value;})
+     }
      Button('保存应用范围').height(34).fontSize(12).borderRadius(10).backgroundColor(BRAND.soft).fontColor(BRAND.cyan).width('100%').onClick(() => {this.saveApplicationScope();})
     }
     Divider().color(BRAND.line)
@@ -1629,10 +1916,31 @@ struct Index {
      Select([{value:'warn'},{value:'info'},{value:'debug'},{value:'error'}]).value(this.settings.logLevel).onSelect((_index: number,value?: string) => {this.settings.logLevel=value || 'warn';this.saveOptions();})
     }.width('100%')
     Divider().color(BRAND.line)
-    Text(`熊盒 VPN 0.8.0 · ${this.coreVersion}`).fontSize(12).fontColor(BRAND.muted).width('100%')
+    Text(`熊盒 VPN 1.0.0 · ${this.coreVersion}`).fontSize(12).fontColor(BRAND.muted).width('100%')
     Text('配置、覆写与日志均采用 0600 私有存储，仅保存在本机。').fontSize(11).fontColor(BRAND.muted).width('100%')
    }.padding(16).width('100%').backgroundColor(BRAND.surface).borderRadius(18).border({width:1,color:BRAND.line})
   }.width('100%')
+ }
+
+ @Builder private policyScrollPane() {
+  Refresh({refreshing:$$this.refreshingPolicy}) {
+   Scroll() {
+    this.groupsPage()
+   }.width('100%').height('100%').align(Alignment.Top)
+  }.width('100%').height('100%').onRefreshing(() => {this.refreshPolicyDelays();})
+ }
+
+ @Builder private railItem(index: number,label: string,icon: Resource,activeIcon: Resource) {
+  Column({space:4}) {
+   SymbolGlyph(this.activeTab===index?activeIcon:icon).fontSize(20).fontColor([this.activeTab===index?BRAND.cyan:BRAND.muted])
+   Text(label).fontSize(11).fontWeight(this.activeTab===index?FontWeight.Bold:FontWeight.Medium).fontColor(this.activeTab===index?BRAND.cyan:BRAND.muted)
+  }
+  .width(56)
+  .padding({top:10,bottom:10})
+  .backgroundColor(this.activeTab===index?BRAND.elevated:Color.Transparent)
+  .borderRadius(14)
+  .justifyContent(FlexAlign.Center)
+  .onClick(() => {this.activeTab=index;this.readStatus();})
  }
 
  @Builder private tabItem(index: number,label: string,icon: Resource,activeIcon: Resource) {
@@ -1645,14 +1953,51 @@ struct Index {
  build() {
   WithTheme({theme:BEAR_THEME,colorMode:ThemeColorMode.DARK}) {
    Stack({alignContent:Alignment.Top}) {
-    Column() {
-     Tabs({index:this.activeTab,barPosition:BarPosition.End}) {
-      TabContent(){Scroll(){this.overview()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(0,'总览',$r('sys.symbol.house'),$r('sys.symbol.house_fill')))
-      TabContent(){Scroll(){this.groupsPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(1,'策略',$r('sys.symbol.dot_grid_2x2'),$r('sys.symbol.dot_grid_2x2')))
-      TabContent(){Scroll(){this.activityPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(2,'活动',$r('sys.symbol.waveform'),$r('sys.symbol.waveform')))
-      TabContent(){Scroll(){this.managePage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(3,'管理',$r('sys.symbol.gearshape'),$r('sys.symbol.gearshape_fill')))
-     }.barMode(BarMode.Fixed).barHeight(56).barBackgroundColor(BRAND.surface).scrollable(false).onChange((index: number) => {this.activeTab=index;this.readStatus();}).layoutWeight(1)
-    }.width('100%').height('100%')
+    if(this.windowIsWide){
+     // Mate XTs Wide-Screen Master-Detail Layout: Rail (72vp) + Overview Console (380vp) + Flexible Workspace
+     Row() {
+      Column({space:10}) {
+       this.railItem(0,'总览',$r('sys.symbol.house'),$r('sys.symbol.house_fill'))
+       this.railItem(1,'策略',$r('sys.symbol.dot_grid_2x2'),$r('sys.symbol.dot_grid_2x2'))
+       this.railItem(2,'活动',$r('sys.symbol.waveform'),$r('sys.symbol.waveform'))
+       this.railItem(3,'管理',$r('sys.symbol.gearshape'),$r('sys.symbol.gearshape_fill'))
+      }
+      .width(72)
+      .height('100%')
+      .padding({top:16,bottom:16})
+      .backgroundColor(BRAND.surface)
+      .border({width:{right:1},color:BRAND.line})
+      .alignItems(HorizontalAlign.Center)
+
+      Column() {
+       Scroll(){this.overview()}.width('100%').height('100%').align(Alignment.Top)
+      }
+      .width(380)
+      .height('100%')
+      .border({width:{right:1},color:BRAND.line})
+
+      Column() {
+       if(this.activeTab===2){
+        Scroll(){this.activityPage()}.width('100%').height('100%').align(Alignment.Top)
+       } else if(this.activeTab===3){
+        Scroll(){this.managePage()}.width('100%').height('100%').align(Alignment.Top)
+       } else {
+        this.policyScrollPane()
+       }
+      }
+      .layoutWeight(1)
+      .height('100%')
+     }.width('100%').height('100%')
+    } else {
+     Column() {
+      Tabs({index:this.activeTab,barPosition:BarPosition.End}) {
+       TabContent(){Scroll(){this.overview()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(0,'总览',$r('sys.symbol.house'),$r('sys.symbol.house_fill')))
+       TabContent(){this.policyScrollPane()}.tabBar(this.tabItem(1,'策略',$r('sys.symbol.dot_grid_2x2'),$r('sys.symbol.dot_grid_2x2')))
+       TabContent(){Scroll(){this.activityPage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(2,'活动',$r('sys.symbol.waveform'),$r('sys.symbol.waveform')))
+       TabContent(){Scroll(){this.managePage()}.width('100%').height('100%').align(Alignment.Top)}.tabBar(this.tabItem(3,'管理',$r('sys.symbol.gearshape'),$r('sys.symbol.gearshape_fill')))
+      }.barMode(BarMode.Fixed).barHeight(56).barBackgroundColor(BRAND.surface).scrollable(false).onChange((index: number) => {this.activeTab=index;this.readStatus();}).layoutWeight(1)
+     }.width('100%').height('100%')
+    }
 
     // Non-shifting Floating Top Toast Pill
     if(this.message){
