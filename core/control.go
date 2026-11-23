@@ -35,6 +35,7 @@ type controlRequest struct {
 	InterfaceName string                `json:"interfaceName,omitempty"`
 	NetID         int32                 `json:"netId,omitempty"`
 	Host          string                `json:"host,omitempty"`
+	Content       string                `json:"content,omitempty"`
 }
 
 type groupSnapshot struct {
@@ -69,6 +70,7 @@ type dashboardSnapshot struct {
 	Modes          []string         `json:"modes"`
 	Mode           string           `json:"mode"`
 	WireGuard      []wireGuardView  `json:"wireGuard"`
+	Tunnels        []tunnelView     `json:"tunnels,omitempty"`
 }
 type diagnoseResult struct {
 	Host      string   `json:"host"`
@@ -84,6 +86,8 @@ type controlReply struct {
 	Message   string             `json:"message"`
 	Data      *dashboardSnapshot `json:"data,omitempty"`
 	Diagnosis *diagnoseResult    `json:"diagnosis,omitempty"`
+	Converted string             `json:"converted,omitempty"`
+	DeepProbe *deepProbeResult   `json:"deepProbe,omitempty"`
 }
 
 var logURL = regexp.MustCompile(`https?://[^\s]+`)
@@ -409,11 +413,22 @@ func coreControl(input string) string {
 	defer lifecycle.Unlock()
 	reply := controlReply{Message: "内核操作失败"}
 	var request controlRequest
-	if err := json.Unmarshal([]byte(input), &request); err != nil || running == nil {
+	if err := json.Unmarshal([]byte(input), &request); err != nil {
+		reply.Message = "VPN 未运行或请求无效"
+	} else if request.Action == "convert-profile" {
+		converted, count, convErr := convertSubscriptionWithCount(request.Content)
+		if convErr != nil {
+			reply.Message = convErr.Error()
+		} else {
+			reply.OK = true
+			reply.Message = fmt.Sprintf("已转换 %d 个节点", count)
+			reply.Converted = converted
+		}
+	} else if running == nil {
 		reply.Message = "VPN 未运行或请求无效"
 	} else {
 		timeout := 2 * time.Second
-		if request.Action == "wg-probe" {
+		if request.Action == "wg-probe" || request.Action == "deep-probe" {
 			timeout = 4 * time.Second
 		} else if request.Action == "diagnose-host" {
 			timeout = 3 * time.Second
@@ -455,6 +470,7 @@ func coreControl(input string) string {
 		case "snapshot":
 			data := &dashboardSnapshot{Groups: []*daemon.Group{}, Connections: []connectionView{}, RecentRequests: []connectionView{}, Logs: []string{}, Modes: []string{}}
 			data.WireGuard = wireGuardViews()
+			data.Tunnels = tunnelViews(running.Instance())
 			groups := &groupSnapshot{ctx: ctx}
 			_ = running.SubscribeGroups(&emptypb.Empty{}, groups)
 			if groups.groups != nil {
@@ -502,6 +518,10 @@ func coreControl(input string) string {
 			_, err = running.URLTest(ctx, &daemon.URLTestRequest{OutboundTag: request.Outbound})
 		case "wg-probe":
 			probe := probeWireGuard(ctx, request.Outbound)
+			reply.Message = probe.Summary
+		case "deep-probe":
+			probe := runDeepProbe(ctx)
+			reply.DeepProbe = &probe
 			reply.Message = probe.Summary
 		case "close":
 			_, err = running.CloseConnection(ctx, &daemon.CloseConnectionRequest{Id: request.ID})
