@@ -4,24 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
+	mDNS "github.com/miekg/dns"
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/daemon"
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 type controlRequest struct {
-	Action   string                `json:"action"`
-	Group    string                `json:"group"`
-	Outbound string                `json:"outbound"`
-	ID       string                `json:"id"`
-	Mode     string                `json:"mode"`
-	Network  *physicalNetworkState `json:"network,omitempty"`
+	Action        string                `json:"action"`
+	Group         string                `json:"group"`
+	Outbound      string                `json:"outbound"`
+	ID            string                `json:"id"`
+	Mode          string                `json:"mode"`
+	Network       *physicalNetworkState `json:"network,omitempty"`
+	InterfaceName string                `json:"interfaceName,omitempty"`
+	NetID         int32                 `json:"netId,omitempty"`
+	Host          string                `json:"host,omitempty"`
 }
 
 type groupSnapshot struct {
@@ -44,19 +57,33 @@ type connectionView struct {
 	Upload      int64  `json:"upload"`
 	Download    int64  `json:"download"`
 	CreatedAt   int64  `json:"createdAt"`
+	Status      string `json:"status,omitempty"`
+	ClosedAt    int64  `json:"closedAt,omitempty"`
+	DurationMs  int64  `json:"durationMs,omitempty"`
 }
 type dashboardSnapshot struct {
-	Groups      []*daemon.Group  `json:"groups"`
-	Connections []connectionView `json:"connections"`
-	Logs        []string         `json:"logs"`
-	Modes       []string         `json:"modes"`
-	Mode        string           `json:"mode"`
-	WireGuard   []wireGuardView  `json:"wireGuard"`
+	Groups         []*daemon.Group  `json:"groups"`
+	Connections    []connectionView `json:"connections"`
+	RecentRequests []connectionView `json:"recentRequests,omitempty"`
+	Logs           []string         `json:"logs"`
+	Modes          []string         `json:"modes"`
+	Mode           string           `json:"mode"`
+	WireGuard      []wireGuardView  `json:"wireGuard"`
+}
+type diagnoseResult struct {
+	Host      string   `json:"host"`
+	IPv4      []string `json:"ipv4"`
+	IPv6      []string `json:"ipv6"`
+	DNSError  string   `json:"dnsError,omitempty"`
+	LatencyMs int64    `json:"latencyMs"`
+	Mode      string   `json:"mode,omitempty"`
+	Summary   string   `json:"summary"`
 }
 type controlReply struct {
-	OK      bool               `json:"ok"`
-	Message string             `json:"message"`
-	Data    *dashboardSnapshot `json:"data,omitempty"`
+	OK        bool               `json:"ok"`
+	Message   string             `json:"message"`
+	Data      *dashboardSnapshot `json:"data,omitempty"`
+	Diagnosis *diagnoseResult    `json:"diagnosis,omitempty"`
 }
 
 var logURL = regexp.MustCompile(`https?://[^\s]+`)
@@ -124,6 +151,258 @@ func safeLog(value string) string {
 	return value
 }
 
+func buildConnectionView(conn *trafficcontrol.TrackerMetadata, status string) connectionView {
+	rule := ""
+	if conn.Rule != nil {
+		rule = conn.Rule.String()
+		if len(rule) > 512 {
+			rule = rule[:512] + "…"
+		}
+	}
+	domain := conn.Metadata.Domain
+	if len(domain) > 255 {
+		domain = domain[:255] + "…"
+	}
+	view := connectionView{
+		ID:          conn.ID.String(),
+		Network:     conn.Metadata.Network,
+		Source:      conn.Metadata.Source.String(),
+		Destination: conn.Metadata.Destination.String(),
+		Domain:      domain,
+		Outbound:    conn.Outbound,
+		Rule:        rule,
+		Upload:      conn.Upload.Load(),
+		Download:    conn.Download.Load(),
+		CreatedAt:   conn.CreatedAt.UnixMilli(),
+		Status:      status,
+	}
+	if status == "closed" && !conn.ClosedAt.IsZero() {
+		view.ClosedAt = conn.ClosedAt.UnixMilli()
+		duration := conn.ClosedAt.Sub(conn.CreatedAt).Milliseconds()
+		if duration < 0 {
+			duration = 0
+		}
+		view.DurationMs = duration
+	}
+	return view
+}
+
+type recentRequestItem struct {
+	createdAt time.Time
+	view      connectionView
+}
+
+func collectRecentRequests(active, closed []*trafficcontrol.TrackerMetadata) []connectionView {
+	seen := make(map[string]bool, len(active)+len(closed))
+	items := make([]recentRequestItem, 0, len(active)+len(closed))
+	for _, conn := range active {
+		if conn == nil {
+			continue
+		}
+		id := conn.ID.String()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		items = append(items, recentRequestItem{
+			createdAt: conn.CreatedAt,
+			view:      buildConnectionView(conn, "active"),
+		})
+	}
+	for _, conn := range closed {
+		if conn == nil {
+			continue
+		}
+		id := conn.ID.String()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		items = append(items, recentRequestItem{
+			createdAt: conn.CreatedAt,
+			view:      buildConnectionView(conn, "closed"),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].createdAt.After(items[j].createdAt)
+	})
+	if len(items) > 500 {
+		items = items[:500]
+	}
+	result := make([]connectionView, len(items))
+	for i, item := range items {
+		result[i] = item.view
+	}
+	return result
+}
+
+type diagnosePacketWriter struct {
+	ch chan []byte
+}
+
+func (w *diagnosePacketWriter) WritePacket(buffer *buf.Buffer, _ M.Socksaddr) error {
+	defer buffer.Release()
+	data := append([]byte(nil), buffer.Bytes()...)
+	select {
+	case w.ch <- data:
+	default:
+	}
+	return nil
+}
+
+func lookupViaRouterDNS(ctx context.Context, router adapter.Router, host string, qtype uint16) ([]netip.Addr, error) {
+	msg := new(mDNS.Msg)
+	msg.SetQuestion(mDNS.Fqdn(host), qtype)
+	msg.RecursionDesired = true
+	payload, err := msg.Pack()
+	if err != nil {
+		return nil, err
+	}
+	writer := &diagnosePacketWriter{ch: make(chan []byte, 1)}
+	router.HijackDNSPacket(ctx, payload, writer, adapter.InboundContext{
+		Inbound:     "diagnose",
+		InboundType: "internal",
+		Network:     "udp",
+	})
+	select {
+	case raw := <-writer.ch:
+		var resp mDNS.Msg
+		if err := resp.Unpack(raw); err != nil {
+			return nil, err
+		}
+		if resp.Rcode != mDNS.RcodeSuccess {
+			code := mDNS.RcodeToString[resp.Rcode]
+			if code == "" {
+				code = fmt.Sprintf("RCODE_%d", resp.Rcode)
+			}
+			return nil, errors.New(code)
+		}
+		var addrs []netip.Addr
+		for _, ans := range resp.Answer {
+			switch rr := ans.(type) {
+			case *mDNS.A:
+				if addr, ok := netip.AddrFromSlice(rr.A); ok {
+					addrs = append(addrs, addr.Unmap())
+				}
+			case *mDNS.AAAA:
+				if addr, ok := netip.AddrFromSlice(rr.AAAA); ok {
+					addrs = append(addrs, addr)
+				}
+			}
+		}
+		return addrs, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func diagnoseHost(ctx context.Context, host string) (*diagnoseResult, error) {
+	if host == "" || len(host) > 253 || strings.ContainsFunc(host, unicode.IsSpace) {
+		return nil, errors.New("主机名无效")
+	}
+	start := time.Now()
+	mode := ""
+	if running != nil {
+		if status, e := running.GetClashModeStatus(ctx, &emptypb.Empty{}); e == nil && status != nil {
+			mode = status.CurrentMode
+		}
+	}
+	result := &diagnoseResult{
+		Host: host,
+		IPv4: []string{},
+		IPv6: []string{},
+		Mode: mode,
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		addr = addr.Unmap()
+		if addr.Is4() {
+			result.IPv4 = append(result.IPv4, addr.String())
+			result.Summary = "IPv4 地址，无需 DNS 解析"
+		} else {
+			result.IPv6 = append(result.IPv6, addr.String())
+			result.Summary = "IPv6 地址，无需 DNS 解析"
+		}
+		result.LatencyMs = time.Since(start).Milliseconds()
+		return result, nil
+	}
+
+	v4Set := map[string]bool{}
+	v6Set := map[string]bool{}
+	addAddr := func(addr netip.Addr) {
+		addr = addr.Unmap()
+		if addr.Is4() {
+			v4Set[addr.String()] = true
+		} else if addr.Is6() {
+			v6Set[addr.String()] = true
+		}
+	}
+
+	var dnsErr error
+	usedRouter := false
+	if running != nil {
+		if instance := running.Instance(); instance != nil && instance.Box() != nil && instance.Box().Router() != nil {
+			usedRouter = true
+			router := instance.Box().Router()
+			routerCtx, routerCancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+			var wg sync.WaitGroup
+			var aAddrs, aaaaAddrs []netip.Addr
+			var aErr, aaaaErr error
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				aAddrs, aErr = lookupViaRouterDNS(routerCtx, router, host, mDNS.TypeA)
+			}()
+			go func() {
+				defer wg.Done()
+				aaaaAddrs, aaaaErr = lookupViaRouterDNS(routerCtx, router, host, mDNS.TypeAAAA)
+			}()
+			wg.Wait()
+			routerCancel()
+			for _, addr := range aAddrs {
+				addAddr(addr)
+			}
+			for _, addr := range aaaaAddrs {
+				addAddr(addr)
+			}
+			if aErr != nil && aaaaErr != nil {
+				dnsErr = aErr
+			}
+		}
+	}
+	if len(v4Set) == 0 && len(v6Set) == 0 && (!usedRouter || dnsErr != nil) {
+		if ips, err := net.DefaultResolver.LookupIPAddr(ctx, host); err == nil {
+			dnsErr = nil
+			for _, ip := range ips {
+				if addr, ok := netip.AddrFromSlice(ip.IP); ok {
+					addAddr(addr)
+				}
+			}
+		} else if dnsErr == nil {
+			dnsErr = err
+		}
+	}
+
+	for ip := range v4Set {
+		result.IPv4 = append(result.IPv4, ip)
+	}
+	for ip := range v6Set {
+		result.IPv6 = append(result.IPv6, ip)
+	}
+	sort.Strings(result.IPv4)
+	sort.Strings(result.IPv6)
+	result.LatencyMs = time.Since(start).Milliseconds()
+
+	if len(result.IPv4) > 0 || len(result.IPv6) > 0 {
+		result.Summary = fmt.Sprintf("解析成功：IPv4 %d 条，IPv6 %d 条（%dms）", len(result.IPv4), len(result.IPv6), result.LatencyMs)
+	} else if dnsErr != nil {
+		result.DNSError = dnsErr.Error()
+		result.Summary = "DNS 解析失败：" + result.DNSError
+	} else {
+		result.Summary = "未解析到可用 IP 记录"
+	}
+	return result, nil
+}
+
 // Calls stay inside the VPN process. No TCP/Unix control listener is opened.
 func coreControl(input string) string {
 	lifecycle.Lock()
@@ -136,6 +415,8 @@ func coreControl(input string) string {
 		timeout := 2 * time.Second
 		if request.Action == "wg-probe" {
 			timeout = 4 * time.Second
+		} else if request.Action == "diagnose-host" {
+			timeout = 3 * time.Second
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -152,8 +433,27 @@ func coreControl(input string) string {
 			if err == nil && activePlatform.setNetworkState(state) {
 				running.UpdateWIFIState()
 			}
+		case "update-physical-net":
+			if activePlatform == nil || request.NetID <= 0 || request.InterfaceName == "" {
+				err = errors.New("物理网络参数无效")
+				break
+			}
+			var state physicalNetworkState
+			if request.Network != nil {
+				encoded, _ := json.Marshal(request.Network)
+				state, err = parsePhysicalNetworkState(string(encoded))
+				if err != nil {
+					break
+				}
+			}
+			err = activePlatform.updatePhysicalNetwork(request.InterfaceName, request.NetID, state)
+			if err == nil {
+				running.UpdateWIFIState()
+				running.ResetNetwork()
+				reply.Message = "物理网络已热切换"
+			}
 		case "snapshot":
-			data := &dashboardSnapshot{Groups: []*daemon.Group{}, Connections: []connectionView{}, Logs: []string{}, Modes: []string{}}
+			data := &dashboardSnapshot{Groups: []*daemon.Group{}, Connections: []connectionView{}, RecentRequests: []connectionView{}, Logs: []string{}, Modes: []string{}}
 			data.WireGuard = wireGuardViews()
 			groups := &groupSnapshot{ctx: ctx}
 			_ = running.SubscribeGroups(&emptypb.Empty{}, groups)
@@ -170,23 +470,27 @@ func coreControl(input string) string {
 				data.Mode = mode.CurrentMode
 			}
 			if instance := running.Instance(); instance != nil && instance.TrafficManager() != nil {
-				connections := instance.TrafficManager().Connections()
+				manager := instance.TrafficManager()
+				activeConnections := manager.Connections()
+				closedConnections := manager.ClosedConnections()
+				data.RecentRequests = collectRecentRequests(activeConnections, closedConnections)
+				connections := append([]*trafficcontrol.TrackerMetadata(nil), activeConnections...)
 				sort.Slice(connections, func(i, j int) bool { return connections[i].CreatedAt.After(connections[j].CreatedAt) })
 				if len(connections) > 200 {
 					connections = connections[:200]
 				}
 				for _, conn := range connections {
-					rule := ""
-					if conn.Rule != nil {
-						rule = conn.Rule.String()
-						if len(rule) > 512 {
-							rule = rule[:512] + "…"
-						}
-					}
-					data.Connections = append(data.Connections, connectionView{ID: conn.ID.String(), Network: conn.Metadata.Network, Source: conn.Metadata.Source.String(), Destination: conn.Metadata.Destination.String(), Domain: conn.Metadata.Domain, Outbound: conn.Outbound, Rule: rule, Upload: conn.Upload.Load(), Download: conn.Download.Load(), CreatedAt: conn.CreatedAt.UnixMilli()})
+					data.Connections = append(data.Connections, buildConnectionView(conn, "active"))
 				}
 			}
 			reply.Data = data
+		case "diagnose-host":
+			var diagnosis *diagnoseResult
+			diagnosis, err = diagnoseHost(ctx, request.Host)
+			if err == nil {
+				reply.Diagnosis = diagnosis
+				reply.Message = diagnosis.Summary
+			}
 		case "select":
 			_, err = running.SelectOutbound(ctx, &daemon.SelectOutboundRequest{GroupTag: request.Group, OutboundTag: request.Outbound})
 			if err == nil && selectionStatePath != "" {

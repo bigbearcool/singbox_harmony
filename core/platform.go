@@ -15,7 +15,7 @@ type harmonyPlatform struct {
 	iface         string
 	tunName       string
 	netID         int32
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	wifiMu        sync.RWMutex
 	networkState  physicalNetworkState
 	listener      libbox.InterfaceUpdateListener
@@ -29,7 +29,10 @@ func (*harmonyPlatform) LocalDNSTransport() libbox.LocalDNSTransport { return ni
 // API 22+ protectProcessNet is awaited by ArkTS before SBStart. A failure aborts startup.
 func (*harmonyPlatform) UsePlatformAutoDetectInterfaceControl() bool { return true }
 func (p *harmonyPlatform) AutoDetectInterfaceControl(fd int32) error {
-	err := bindPhysicalSocket(fd, p.netID)
+	p.mu.RLock()
+	netID := p.netID
+	p.mu.RUnlock()
+	err := bindPhysicalSocket(fd, netID)
 	if err != nil {
 		p.bindFailure.Add(1)
 		p.lastBindError.Store(err.Error())
@@ -47,8 +50,9 @@ func (*harmonyPlatform) FindConnectionOwner(int32, string, int32, string, int32)
 func (p *harmonyPlatform) StartDefaultInterfaceMonitor(l libbox.InterfaceUpdateListener) error {
 	p.mu.Lock()
 	p.listener = l
+	iface := p.iface
 	p.mu.Unlock()
-	if p.iface == "" {
+	if iface == "" {
 		return fmt.Errorf("物理网络接口不可用")
 	}
 	interfaces, err := nativeInterfaces()
@@ -56,17 +60,45 @@ func (p *harmonyPlatform) StartDefaultInterfaceMonitor(l libbox.InterfaceUpdateL
 		return err
 	}
 	for _, it := range interfaces {
-		if it.Name == p.iface {
+		if it.Name == iface {
 			l.UpdateDefaultInterface(it.Name, it.Index, false, false)
 			return nil
 		}
 	}
-	return fmt.Errorf("物理网络接口不存在: %s", p.iface)
+	return fmt.Errorf("物理网络接口不存在: %s", iface)
 }
 func (p *harmonyPlatform) CloseDefaultInterfaceMonitor(libbox.InterfaceUpdateListener) error {
 	p.mu.Lock()
 	p.listener = nil
 	p.mu.Unlock()
+	return nil
+}
+
+func (p *harmonyPlatform) updatePhysicalNetwork(iface string, netID int32, state physicalNetworkState) error {
+	if netID <= 0 {
+		return fmt.Errorf("底层网络 ID 无效")
+	}
+	if iface == "" {
+		return fmt.Errorf("物理网络接口不可用")
+	}
+	p.mu.Lock()
+	p.netID = netID
+	p.iface = iface
+	listener := p.listener
+	p.mu.Unlock()
+	if state.Type != "" {
+		p.setNetworkState(state)
+	}
+	if listener != nil {
+		if interfaces, err := nativeInterfaces(); err == nil {
+			for _, it := range interfaces {
+				if it.Name == iface {
+					listener.UpdateDefaultInterface(it.Name, it.Index, false, false)
+					break
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -91,8 +123,11 @@ func (p *harmonyPlatform) GetInterfaces() (libbox.NetworkInterfaceIterator, erro
 	if err != nil {
 		return nil, err
 	}
+	p.mu.RLock()
+	iface := p.iface
+	p.mu.RUnlock()
 	for _, it := range interfaces {
-		if it.Name == p.iface {
+		if it.Name == iface {
 			it.Type = p.networkType()
 		}
 	}
