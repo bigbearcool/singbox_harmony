@@ -2,7 +2,7 @@ import { VpnStatus } from './Store';
 
 export function vpnStatusExpired(status: VpnStatus,now: number=Date.now()): boolean {
  if(!['running','starting','paused','reconnecting'].includes(status.phase)){return false;}
- return !Number.isFinite(status.updatedAt) || now-status.updatedAt>(status.phase==='starting'?90000:15000);
+ return !Number.isFinite(status.updatedAt) || now-status.updatedAt>(status.phase==='starting'?90000:35000);
 }
 export function assessExpiredVpnStatus(status: VpnStatus,present: boolean | undefined,now: number=Date.now()): VpnStatus {
  if(!vpnStatusExpired(status,now)){return status;}
