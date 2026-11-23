@@ -1,9 +1,16 @@
 # 熊盒 VPN · HarmonyOS 自用版
 
-面向华为 Mate XTs（GRL-AL20）、HarmonyOS 7 / API 26 的原生 VPN 客户端（0.7.3 自用签名版）。
+面向华为 Mate XTs（GRL-AL20）、HarmonyOS 7 / API 26 的原生 VPN 客户端（0.8.0 候选版；当前真机已安装验收基线为 0.7.3）。
 ArkTS / ArkUI 界面，系统 VpnExtensionAbility 管理 TUN，C++ N-API 桥接源码构建的 sing-box。
 
 ## 当前状态
+
+**0.8.0 候选版（Surge 对标升级，已完成离线实现与 Go race / ETS 测试，待真机验收）**：
+- **Always-On 四层韧性底座**：`NetConnection` 事件驱动 + 450ms 防抖 + **TUN 保持热切换（Soft Handover）** + 切网黑洞防泄漏（最多 60s 保持 TUN）+ 休眠跳变检测与 `bindFailure`/`dnsError` 自动自愈 + API 26 `VpnObserver` 授权监听 + `desired-state.json` 意图持久化；后台无 UI 兜底检查节流至 15s，健康检查过期阈值同步调整至 35s 避免误报。
+- **Surge 式高频操控**：总览页出站模式一键切换、SSID 策略联动（按 Wi-Fi 自动切模式／节点组／暂停）、节点延迟色标与排序。
+- **Surge 式可观测性**：Go 核心 500 条最近请求环形缓冲（含已结束短连接与耗时）、域名／DNS 实时诊断（`diagnose-host`）。
+- **Surge 式本地模块覆写**：独立 `overrides.json`（置顶直连／代理／拒绝域名与 CIDR + 静态 Host DNS 映射），订阅更新无损合并，不改写原始配置。
+- **待真机验收项**：上述 0.8.0 新增能力目前仅完成离线实现与本机 Go race / ETS 单元测试，尚未在 Mate XTs 真机完成打包安装、真实 Wi-Fi/蜂窝热切换（Soft Handover 与 60s 黑洞防泄漏）、长时间休眠唤醒自愈、`VpnObserver` 授权变更响应、SSID 策略联动、最近请求与 `diagnose-host` 实测，以及本地覆写生效验证。
 
 **0.7.3 已安装并完成本轮验收**：以用户机甲熊 IP 制作带 VPN 铭牌的专属图标，六个页面及桌面卡片统一为青蓝／深蓝配色。已修复底部白色区域及顶部遮挡；窗口按系统安全区实时避让，折叠 1008×2232 与展开 3184×2232 均已目视核对，展开后 VPN 仍运行。13 个 ETS 测试模块、签名及包内检查通过；原配置与设置保持不变，正常冷启动的双栈及 WireGuard 家庭 DNS 复测通过。记录见 [品牌设计](docs/brand/README.md) 和 [0.7 验证摘要](docs/build-verification-v07.json)。Wi-Fi 实测仍按用户要求暂缓。
 
