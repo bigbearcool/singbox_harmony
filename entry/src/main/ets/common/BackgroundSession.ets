@@ -191,10 +191,12 @@ export class BackgroundSession {
    // Publish with the documented public enums, rather than copying the native
    // task metadata (HarmonyOS 7 returned contentType 8 on this device).
    const text: string=`上行 ${Math.round(up/1024)} KB · 下行 ${Math.round(down/1024)} KB`;
+   const networkType: string=typeof status.networkType==='string'?status.networkType.trim():'';
+   const liveText: string=networkType?`已连接 · ${networkType} · ${text}`:`已连接 · ${text}`;
    // Owner updates require a template even when no completion percentage is
    // meaningful. Omit progressValue; present the measured bytes as text.
-   const template: notificationManager.NotificationTemplate={name:'downloadTemplate',data:{title:'VPN 已连接',fileName:text}};
-   await notificationManager.publish({id:this.notification.notificationId,notificationSlotType:notificationManager.SlotType.LIVE_VIEW,updateOnly:true,tapDismissed:false,template:template,content:{notificationContentType:notificationManager.ContentType.NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW,systemLiveView:{typeCode:8,title:'熊盒 VPN',text:`已连接 · ${text}`}}});
+   const template: notificationManager.NotificationTemplate={name:'downloadTemplate',data:{title:networkType?`VPN 已连接 · ${networkType}`:'VPN 已连接',fileName:text}};
+   await notificationManager.publish({id:this.notification.notificationId,notificationSlotType:notificationManager.SlotType.LIVE_VIEW,updateOnly:true,tapDismissed:false,template:template,content:{notificationContentType:notificationManager.ContentType.NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW,systemLiveView:{typeCode:8,title:'熊盒 VPN',text:liveText}}});
    if(generation===this.generation){this.lastTransferBytes=transferred;this.notificationUpdatedAt=Date.now();this.diagnostics();}
   } catch(error) {if(generation===this.generation){const code: number=(error as BusinessError).code || 0;this.diagnostics(code);this.publish(`数据传输通知更新未完成（${code}），后台保障待系统确认`);}}
  }

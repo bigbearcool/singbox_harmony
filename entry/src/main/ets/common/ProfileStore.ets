@@ -5,7 +5,17 @@ import bridge from 'libsingboxbridge.so';
 import { readPrivate, writePrivate, CoreResponse, DIRECT_PROFILE, BLOCK_IPV6_PROFILE } from './Store';
 import { SsidPolicyRule } from './WifiConditions';
 
-export interface SavedProfile {id: string; name: string; url: string; updatedAt: number; autoUpdateHours: number; revision?: string;}
+export interface SubscriptionUserinfo {
+ upload: number;
+ download: number;
+ total: number;
+ expire: number;
+}
+export interface FetchedProfile {
+ content: string;
+ userinfo?: SubscriptionUserinfo;
+}
+export interface SavedProfile {id: string; name: string; url: string; updatedAt: number; autoUpdateHours: number; revision?: string; userinfo?: SubscriptionUserinfo;}
 export interface ProfileLibrary {selected: string; profiles: SavedProfile[];}
 export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[]; locationAssist: boolean; backgroundUpdates: boolean; blackholeOnSwitch: boolean; ssidPolicies: SsidPolicyRule[];}
 export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[],locationAssist:false,backgroundUpdates:true,blackholeOnSwitch:true,ssidPolicies:[]};}
@@ -87,8 +97,10 @@ function cleanupBlobs(dir: string,id: string,keep: string=''): void {
   if(name===`saved-profile-${id}.json` || (name.startsWith(`saved-profile-${id}-`) && name.endsWith('.json'))){try {fs.unlinkSync(`${dir}/${name}`);} catch(_error) {}}
  }} catch(_error) {}
 }
-function commitContent(dir: string,library: ProfileLibrary,record: SavedProfile,name: string,content: string): ProfileLibrary {
+function commitContent(dir: string,library: ProfileLibrary,record: SavedProfile,name: string,content: string,userinfo?: SubscriptionUserinfo): ProfileLibrary {
+ const nextUserinfo: SubscriptionUserinfo | undefined=userinfo!==undefined?userinfo:record.userinfo;
  const updated: SavedProfile={id:record.id,name:name.trim().slice(0,80) || '我的配置',url:record.url,updatedAt:Date.now(),autoUpdateHours:record.autoUpdateHours,revision:util.generateRandomUUID()};
+ if(nextUserinfo!==undefined){updated.userinfo=nextUserinfo;}
  const path: string=profilePath(dir,updated);writePrivate(path,content);
  const next: ProfileLibrary={selected:library.selected,profiles:library.profiles.map((p: SavedProfile): SavedProfile => p.id===record.id?updated:p)};
  try {writeIndex(dir,next);} catch(error) {try {fs.unlinkSync(path);} catch(_error) {}throw new Error('未能提交配置更新，旧版本已保留');}
@@ -111,11 +123,12 @@ export async function validateProfile(content: string): Promise<void> {
  const checked: CoreResponse=JSON.parse(await bridge.check(content)) as CoreResponse;
  if(!checked.ok){throw new Error('内核未接受该配置；请检查 JSON、协议和字段版本');}
 }
-export async function addProfile(dir: string,_library: ProfileLibrary,name: string,content: string,url: string=''): Promise<ProfileLibrary> {
+export async function addProfile(dir: string,_library: ProfileLibrary,name: string,content: string,url: string='',userinfo?: SubscriptionUserinfo): Promise<ProfileLibrary> {
  await validateProfile(content);loadLibrary(dir);
  return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {
   const library: ProfileLibrary=currentIndex(dir);
   const record: SavedProfile={id:util.generateRandomUUID(),name:name.trim().slice(0,80) || '新配置',url:url,updatedAt:Date.now(),autoUpdateHours:url?24:0,revision:util.generateRandomUUID()};
+  if(userinfo!==undefined){record.userinfo=userinfo;}
   const path: string=profilePath(dir,record);writePrivate(path,content);
   const next: ProfileLibrary={selected:record.id,profiles:[...library.profiles,record]};
   try {writeIndex(dir,next);} catch(_error) {try {fs.unlinkSync(path);} catch(_error) {}throw new Error('保存未完成，旧配置已保留');}
@@ -139,6 +152,19 @@ export async function editProfile(dir: string,_library: ProfileLibrary,id: strin
  await validateProfile(content);loadLibrary(dir);
  return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {const library: ProfileLibrary=currentIndex(dir);return commitContent(dir,library,recordFor(library,id),name,content);});
 }
+export function renameProfile(dir: string,_library: ProfileLibrary,id: string,name: string): ProfileLibrary {
+ const trimmed: string=name.trim();
+ if(trimmed.length===0 || trimmed.length>80){throw new Error('配置名称应为 1 至 80 个字符');}
+ loadLibrary(dir);
+ return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {
+  const library: ProfileLibrary=currentIndex(dir);
+  const record: SavedProfile=recordFor(library,id);
+  const updated: SavedProfile={id:record.id,name:trimmed,url:record.url,updatedAt:record.updatedAt,autoUpdateHours:record.autoUpdateHours,revision:record.revision};
+  if(record.userinfo!==undefined){updated.userinfo=record.userinfo;}
+  const next: ProfileLibrary={selected:library.selected,profiles:library.profiles.map((p: SavedProfile): SavedProfile => p.id===id?updated:p)};
+  writeIndex(dir,next);return next;
+ });
+}
 export function setAutoUpdate(dir: string,id: string,hours: number): ProfileLibrary {
  if(!Number.isInteger(hours) || hours<0 || hours>168){throw new Error('更新间隔应为 0 至 168 小时的整数');}
  loadLibrary(dir);return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {
@@ -155,7 +181,45 @@ export class ProfileFetchCancellation {
  attach(client: http.HttpRequest): void {if(this.cancelled){throw new Error('更新任务已取消');}this.client=client;}
  detach(): void {this.client=undefined;}
 }
-export async function fetchProfile(url: string,cancellation?: ProfileFetchCancellation): Promise<string> {
+export function parseSubscriptionUserinfo(headerValue: string): SubscriptionUserinfo | undefined {
+ if(typeof headerValue!=='string' || headerValue.trim().length===0){return undefined;}
+ let upload: number=0;
+ let download: number=0;
+ let total: number=0;
+ let expire: number=0;
+ let found: boolean=false;
+ const parts: string[]=headerValue.split(';');
+ for(const part of parts){
+  const idx: number=part.indexOf('=');
+  if(idx<=0){continue;}
+  const key: string=part.slice(0,idx).trim().toLowerCase();
+  const raw: string=part.slice(idx+1).trim();
+  if(raw.length===0){continue;}
+  const num: number=Number(raw);
+  if(!Number.isFinite(num) || num<0){continue;}
+  if(key==='upload'){upload=num;found=true;}
+  else if(key==='download'){download=num;found=true;}
+  else if(key==='total'){total=num;found=true;}
+  else if(key==='expire'){expire=num;found=true;}
+ }
+ if(!found){return undefined;}
+ return {upload:upload,download:download,total:total,expire:expire};
+}
+function readHeaderCaseInsensitive(header: Object | undefined,name: string): string | undefined {
+ if(!header || typeof header!=='object'){return undefined;}
+ const target: string=name.toLowerCase();
+ const map: Record<string,string | string[] | undefined>=header as Record<string,string | string[] | undefined>;
+ const keys: string[]=Object.keys(map);
+ for(const key of keys){
+  if(key.toLowerCase()===target){
+   const val: string | string[] | undefined=map[key];
+   if(typeof val==='string'){return val;}
+   if(Array.isArray(val) && val.length>0 && typeof val[0]==='string'){return val[0];}
+  }
+ }
+ return undefined;
+}
+export async function fetchProfileWithMeta(url: string,cancellation?: ProfileFetchCancellation): Promise<FetchedProfile> {
  if(!/^https?:\/\//i.test(url)){throw new Error('请输入 HTTP 或 HTTPS 配置链接');}
  const client: http.HttpRequest=http.createHttp();
  try {
@@ -165,20 +229,27 @@ export async function fetchProfile(url: string,cancellation?: ProfileFetchCancel
   if(cancellation?.cancelled){throw new Error('更新任务已取消');}
   await validateProfile(response.result);
   if(cancellation?.cancelled){throw new Error('更新任务已取消');}
-  return response.result;
+  const headerValue: string | undefined=readHeaderCaseInsensitive(response.header,'subscription-userinfo');
+  const userinfo: SubscriptionUserinfo | undefined=headerValue?parseSubscriptionUserinfo(headerValue):undefined;
+  if(userinfo!==undefined){return {content:response.result,userinfo:userinfo};}
+  return {content:response.result};
  } catch(_error) {throw new Error('下载或校验失败，已保留原配置。请检查链接、网络及 sing-box JSON 格式');}
  finally {cancellation?.detach();try {client.destroy();} catch(_error) {}}
+}
+export async function fetchProfile(url: string,cancellation?: ProfileFetchCancellation): Promise<string> {
+ const fetched: FetchedProfile=await fetchProfileWithMeta(url,cancellation);
+ return fetched.content;
 }
 export async function refreshProfile(dir: string,_library: ProfileLibrary,id: string,canCommit: () => boolean=(): boolean => true,cancellation?: ProfileFetchCancellation,automatic: boolean=false): Promise<ProfileLibrary> {
  const initial: SavedProfile=recordFor(loadLibrary(dir),id);
  if(automatic && (!Number.isFinite(initial.autoUpdateHours) || initial.autoUpdateHours<=0 || Date.now()-initial.updatedAt<initial.autoUpdateHours*3600000)){throw new Error('自动更新已关闭或尚未到期');}
  if(!initial.url){throw new Error('该配置没有远程链接');}
- const content: string=await fetchProfile(initial.url,cancellation);
+ const fetched: FetchedProfile=await fetchProfileWithMeta(initial.url,cancellation);
  if(!canCommit() || cancellation?.cancelled){throw new Error('更新任务已取消');}
  return withStoreLock<ProfileLibrary>(dir,(): ProfileLibrary => {
   if(!canCommit() || cancellation?.cancelled){throw new Error('更新任务已取消');}
   const current: ProfileLibrary=currentIndex(dir);const record: SavedProfile=recordFor(current,id);
   if(record.url!==initial.url || record.name!==initial.name || record.updatedAt!==initial.updatedAt || record.revision!==initial.revision || record.autoUpdateHours!==initial.autoUpdateHours){throw new Error('配置在下载期间发生变化，已保留最新版本');}
-  return commitContent(dir,current,record,record.name,content);
+  return commitContent(dir,current,record,record.name,fetched.content,fetched.userinfo);
  });
 }
