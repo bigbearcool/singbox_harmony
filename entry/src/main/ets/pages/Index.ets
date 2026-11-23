@@ -7,6 +7,7 @@ import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { RemoteProfileDraft, profileImportLink, parseProfileImportLink } from '../common/ProfileLinks';
 import { runNetworkProbes } from '../common/NetworkProbe';
 import { backgroundSession } from '../common/BackgroundSession';
+import { pushFormStatus } from '../common/FormSync';
 import { ScheduleStatus, readScheduleStatus, syncSubscriptionSchedule } from '../common/SubscriptionSchedule';
 import { UpdateReport, readUpdateReport, runDueProfileUpdates } from '../common/SubscriptionUpdates';
 import { vpnStatusExpired, assessExpiredVpnStatus } from '../common/VpnHealth';
@@ -215,7 +216,9 @@ struct Index {
      this.lastTrafficTime=latest.updatedAt;this.lastUpload=latest.uplink || 0;this.lastDownload=latest.downlink || 0;
     }
     if(latest.phase!=='running'){this.uploadRate=0;this.downloadRate=0;}
+    const cardChanged: boolean=latest.phase!==this.status.phase || (latest.networkType || '')!==(this.status.networkType || '');
     this.status=latest;
+    if(cardChanged){pushFormStatus(this.context.filesDir,latest);}
     if(latest.phase==='running' && ['正在连接','正在重新连接'].includes(this.message)){this.showToast('');}
    }
   } catch(_error) {}
@@ -312,7 +315,7 @@ struct Index {
   await vpnExtension.stopVpnExtensionAbility({bundleName:BUNDLE_NAME,abilityName:VPN_ABILITY});
   await backgroundSession.stop();
   this.waitingSince=0;this.status=initialStatus();this.status.message='VPN 已停止';
-  writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));this.showToast('已断开');
+  writePrivate(`${this.context.filesDir}/vpn-status.json`,JSON.stringify(this.status));pushFormStatus(this.context.filesDir,this.status);this.showToast('已断开');
  }
  private async toggle(automatic: boolean=false): Promise<void> {
   if(!automatic){this.allowAutomaticConnect=false;}
@@ -511,9 +514,9 @@ struct Index {
  private async toggleLocationAssist(value: boolean): Promise<void> {
   if(this.locationChanging){return;}this.locationChanging=true;
   try {
-   if(value && !await backgroundSession.requestPermission()){this.settings=this.locationOptions(false);saveSettings(this.context.filesDir,this.settings);await backgroundSession.reconfigure();this.showToast('定位未授权，已保留普通后台运行方式');return;}
+   if(value && !await backgroundSession.requestPermission()){this.settings=this.locationOptions(false);saveSettings(this.context.filesDir,this.settings);await backgroundSession.reconfigure(this.pageVisible);this.showToast('定位未授权，已保留普通后台运行方式');return;}
    this.settings=this.locationOptions(value);this.saveOptions();
-   await backgroundSession.reconfigure();
+   await backgroundSession.reconfigure(this.pageVisible);
   } catch(_error) {this.showToast('定位辅助设置未完成，请检查系统权限');}
   finally {this.locationChanging=false;}
  }

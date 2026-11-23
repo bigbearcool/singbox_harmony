@@ -4,6 +4,7 @@ import { geoLocationManager } from '@kit.LocationKit';
 import { connection } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { loadSettings } from './ProfileStore';
 import { BUNDLE_NAME, readPrivate, writePrivate, VpnStatus } from './Store';
 
@@ -31,17 +32,30 @@ export class BackgroundSession {
  private lastNotificationAt: number=0;
  private lastTransferBytes: number=-1;
  private notificationUpdatedAt: number=0;
+ private locationTicks: number=0;
  // Deliberately do not inspect, retain, serialize or log the Location object.
- private locationCallback=(_location: geoLocationManager.Location): void => {};
+ private locationCallback=(_location: geoLocationManager.Location): void => {
+  this.locationTicks++;
+  if(this.taskId>=0 && this.mode==='location'){
+   this.publish(`定位辅助运行中（任务 #${this.taskId} · 保活回调 ${this.locationTicks} 次）`);
+  }
+ };
  private cancelCallback=(info: backgroundTaskManager.ContinuousTaskCancelInfo): void => {
   if(info.id!==this.taskId){return;}
+  hilog.warn(0x1700,'SingboxHarmony','bgTask cancelled id=%{public}d reason=%{public}d',info.id,info.reason);
   this.taskId=-1;this.blocked=true;this.stop(`后台任务已取消（${info.reason}），可重新连接或切换模式重试`);
  };
  private suspendCallback=(info: backgroundTaskManager.ContinuousTaskSuspendInfo): void => {
-  if(info.continuousTaskId===this.taskId){this.publish(`后台任务被系统挂起（${info.suspendReason}），驻留未获保障`);}
+  if(info.continuousTaskId===this.taskId){
+   hilog.warn(0x1700,'SingboxHarmony','bgTask suspended id=%{public}d reason=%{public}d',info.continuousTaskId,info.suspendReason);
+   this.publish(`后台任务被系统挂起（${info.suspendReason}），驻留未获保障`);
+  }
  };
  private activeCallback=(info: backgroundTaskManager.ContinuousTaskActiveInfo): void => {
-  if(info.id===this.taskId){this.publish('后台任务已恢复，驻留效果仍需实测');}
+  if(info.id===this.taskId){
+   hilog.info(0x1700,'SingboxHarmony','bgTask active id=%{public}d',info.id);
+   this.publish(this.mode==='location'?`定位辅助已恢复（任务 #${this.taskId} · 保活回调 ${this.locationTicks} 次）`:'后台任务已恢复，驻留效果仍需实测');
+  }
  };
  initialize(context: common.UIAbilityContext): void {this.context=context;if(this.taskId<0){this.publish('后台保障未运行');}this.diagnostics();}
  private publish(message: string): void {AppStorage.setOrCreate('backgroundSessionStatus',message);}
@@ -74,7 +88,15 @@ export class BackgroundSession {
  }
  onBackground(): void {this.foreground=false;}
  async beginSession(): Promise<void> {this.blocked=false;await this.start();}
- async reconfigure(): Promise<void> {await this.stop();this.blocked=false;await this.resumeIfRunning();}
+ async reconfigure(assumeForeground: boolean=false): Promise<void> {
+  await this.stop();
+  this.blocked=false;
+  if(assumeForeground){this.foreground=true;}
+  await this.resumeIfRunning();
+  if(this.taskId<0 && this.context && loadSettings(this.context.filesDir).locationAssist && this.permissionGranted()){
+   this.publish('定位辅助已就绪，连接 VPN 后自动启用');
+  }
+ }
  private async hasVpn(): Promise<boolean> {
   for(const net of await connection.getAllNets()){
    const caps=await connection.getNetCapabilities(net);
@@ -94,10 +116,11 @@ export class BackgroundSession {
     if(this.subscribed || this.observingCancel || this.observingSuspend || this.observingActive){await this.release();}
     if(this.mode==='location' && !this.permissionGranted()){this.publish('模糊定位权限未授权，请重新开启开关');return;}
     if(this.mode==='location' && !geoLocationManager.isLocationEnabled()){this.publish('系统定位已关闭，定位辅助未运行');return;}
-    // Interval in seconds; low-power approximate fixes suffice. No GPS accuracy
-    // request, navigation scenario, coordinates in AppStorage, or persistence.
+    // Interval in seconds; low-power approximate fixes keep MODE_LOCATION active
+    // through standby without GPS accuracy or reading any coordinates.
     if(this.mode==='location'){
-     geoLocationManager.onLocationChange({priority:geoLocationManager.LocationRequestPriority.LOW_POWER,timeInterval:60,distanceInterval:0,maxAccuracy:0},this.locationCallback);
+     this.locationTicks=0;
+     geoLocationManager.onLocationChange({priority:geoLocationManager.LocationRequestPriority.LOW_POWER,timeInterval:15,distanceInterval:0,maxAccuracy:0},this.locationCallback);
      this.subscribed=true;
     }
     backgroundTaskManager.on('continuousTaskCancel',this.cancelCallback);
@@ -120,10 +143,12 @@ export class BackgroundSession {
     if(generation!==this.generation){await this.release();return;}
     this.startedAt=Date.now();this.missingSince=this.startedAt;
     this.timer=setInterval(() => {this.inspect();},5000);
-    this.publish(this.mode==='location'?'定位订阅与后台任务已申请，锁屏驻留效果待实测':'数据传输后台任务已申请，空闲时仍可能被系统挂起');
+    hilog.info(0x1700,'SingboxHarmony','bgTask started mode=%{public}s taskId=%{public}d',this.mode,this.taskId);
+    this.publish(this.mode==='location'?`定位辅助运行中（任务 #${this.taskId} · 等待首次保活回调）`:`数据传输后台任务运行中（任务 #${this.taskId}）`);
    } catch(error) {
     await this.release();
     const code: number=(error as BusinessError).code || 0;
+    hilog.warn(0x1700,'SingboxHarmony','bgTask start failed mode=%{public}s code=%{public}d',this.mode,code);
     this.diagnostics(code);
     this.publish(`后台任务未启动（${code}），VPN 可继续使用`);
    }

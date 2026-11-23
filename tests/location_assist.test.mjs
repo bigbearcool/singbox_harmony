@@ -12,7 +12,7 @@ globalThis.setInterval=callback=>{env.timers.add(callback);return callback};
 globalThis.clearInterval=callback=>env.timers.delete(callback);
 const events=new Map();
 const geoLocationManager={LocationRequestPriority:{LOW_POWER:514},isLocationEnabled:()=>env.locationOn,
- onLocationChange(request,callback){assert.equal(request.priority,514);assert.equal(request.timeInterval,60);env.locationCallback=callback;env.subscriptions++},
+ onLocationChange(request,callback){assert.equal(request.priority,514);assert.equal(request.timeInterval,15);env.locationCallback=callback;env.subscriptions++},
  offLocationChange(callback){assert.equal(callback,env.locationCallback);if(env.offFails)throw Error('off failed');env.subscriptions--;env.locationCallback=null}};
 const backgroundTaskManager={ContinuousTaskRequest:class{},BackgroundTaskMode:{MODE_LOCATION:4,MODE_DATA_TRANSFER:1},BackgroundTaskSubmode:{SUBMODE_NORMAL_NOTIFICATION:2,SUBMODE_LIVE_VIEW_NOTIFICATION:3},
  on:(event,callback)=>{if(event===env.failListener)throw Error('event registration failed');events.set(event,callback)},
@@ -24,9 +24,10 @@ const notificationManager={ContentType:{NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW:5}
 const abilityAccessCtrl={GrantStatus:{PERMISSION_GRANTED:0},createAtManager:()=>({checkAccessTokenSync:()=>env.granted?0:-1,
  requestPermissionsFromUser:async(context,permissions)=>{env.permissionRequests++;assert.deepEqual(permissions,['ohos.permission.APPROXIMATELY_LOCATION']);return {authResults:[env.granted?0:-1]}}})};
 const connection={NetBearType:{BEARER_VPN:4},getAllNets:async()=>{if(env.netFails)throw Error('network service unavailable');return env.vpn?[{netId:100}]:[]},getNetCapabilities:async()=>({bearerTypes:[4]}),getConnectionProperties:async()=>({linkAddresses:['172.19.0.1','fdfe:dcba:9876::1'].map(address=>({address:{address}}))})};
-globalThis.__locationEnv={writePrivate:(path,text)=>env.diagnostics.push(JSON.parse(text)),notificationManager,abilityAccessCtrl,backgroundTaskManager,geoLocationManager,connection,wantAgent:{OperationType:{START_ABILITY:1},WantAgentFlags:{UPDATE_PRESENT_FLAG:4},getWantAgent:async()=>({})},loadSettings:()=>({locationAssist:env.enabled}),BUNDLE_NAME:'com.bigbear.singbox',readPrivate:()=>JSON.stringify(env.status)};
+const hilog={info:()=>{},warn:()=>{},error:()=>{}};
+globalThis.__locationEnv={hilog,writePrivate:(path,text)=>env.diagnostics.push(JSON.parse(text)),notificationManager,abilityAccessCtrl,backgroundTaskManager,geoLocationManager,connection,wantAgent:{OperationType:{START_ABILITY:1},WantAgentFlags:{UPDATE_PRESENT_FLAG:4},getWantAgent:async()=>({})},loadSettings:()=>({locationAssist:env.enabled}),BUNDLE_NAME:'com.bigbear.singbox',readPrivate:()=>JSON.stringify(env.status)};
 let source=fs.readFileSync(new URL('../entry/src/main/ets/common/BackgroundSession.ets',import.meta.url),'utf8').replace(/^import .*;\n/gm,'');
-source='const {writePrivate,notificationManager,abilityAccessCtrl,backgroundTaskManager,geoLocationManager,connection,wantAgent,loadSettings,BUNDLE_NAME,readPrivate}=globalThis.__locationEnv;\n'+source;
+source='const {hilog,writePrivate,notificationManager,abilityAccessCtrl,backgroundTaskManager,geoLocationManager,connection,wantAgent,loadSettings,BUNDLE_NAME,readPrivate}=globalThis.__locationEnv;\n'+source;
 const {BackgroundSession}=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes(source,{mode:'strip'})).toString('base64'));
 function fresh(overrides={}){
  assert.equal(events.size,0);appStorage.clear();
