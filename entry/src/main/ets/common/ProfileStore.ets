@@ -3,15 +3,31 @@ import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import bridge from 'libsingboxbridge.so';
 import { readPrivate, writePrivate, CoreResponse, DIRECT_PROFILE, BLOCK_IPV6_PROFILE } from './Store';
+import { SsidPolicyRule } from './WifiConditions';
 
 export interface SavedProfile {id: string; name: string; url: string; updatedAt: number; autoUpdateHours: number; revision?: string;}
 export interface ProfileLibrary {selected: string; profiles: SavedProfile[];}
-export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[]; locationAssist: boolean; backgroundUpdates: boolean;}
-export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[],locationAssist:false,backgroundUpdates:true};}
+export interface AppSettings {autoReconnect: boolean; autoConnect: boolean; logLevel: string; onDemand: boolean; bypassWifi: string[]; locationAssist: boolean; backgroundUpdates: boolean; blackholeOnSwitch: boolean; ssidPolicies: SsidPolicyRule[];}
+export function defaultSettings(): AppSettings {return {autoReconnect:true,autoConnect:false,logLevel:'warn',onDemand:false,bypassWifi:[],locationAssist:false,backgroundUpdates:true,blackholeOnSwitch:true,ssidPolicies:[]};}
+function sanitizeSsidPolicies(raw?: SsidPolicyRule[]): SsidPolicyRule[] {
+ if (!Array.isArray(raw)) { return []; }
+ const result: SsidPolicyRule[] = [];
+ for (const item of raw) {
+  if (!item || typeof item.ssid !== 'string' || item.ssid.length === 0) { continue; }
+  if (item.action === 'pause') {
+   result.push({ ssid: item.ssid, action: 'pause' });
+  } else if (item.action === 'mode' && typeof item.mode === 'string' && item.mode.length > 0) {
+   result.push({ ssid: item.ssid, action: 'mode', mode: item.mode });
+  } else if (item.action === 'group' && typeof item.group === 'string' && item.group.length > 0 && typeof item.outbound === 'string' && item.outbound.length > 0) {
+   result.push({ ssid: item.ssid, action: 'group', group: item.group, outbound: item.outbound });
+  }
+ }
+ return result;
+}
 export function loadSettings(dir: string): AppSettings {
  try {
   const stored: AppSettings=JSON.parse(readPrivate(`${dir}/settings.json`)) as AppSettings;
-  return {autoReconnect:stored.autoReconnect!==false,autoConnect:stored.autoConnect===true,logLevel:stored.logLevel || 'warn',onDemand:stored.onDemand===true,bypassWifi:stored.bypassWifi || [],locationAssist:stored.locationAssist===true,backgroundUpdates:stored.backgroundUpdates!==false};
+  return {autoReconnect:stored.autoReconnect!==false,autoConnect:stored.autoConnect===true,logLevel:stored.logLevel || 'warn',onDemand:stored.onDemand===true,bypassWifi:stored.bypassWifi || [],locationAssist:stored.locationAssist===true,backgroundUpdates:stored.backgroundUpdates!==false,blackholeOnSwitch:stored.blackholeOnSwitch!==false,ssidPolicies:sanitizeSsidPolicies(stored.ssidPolicies)};
  } catch(_error) {return defaultSettings();}
 }
 export function saveSettings(dir: string,value: AppSettings): void {writePrivate(`${dir}/settings.json`,JSON.stringify(value));}

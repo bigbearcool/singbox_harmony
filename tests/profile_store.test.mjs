@@ -18,7 +18,17 @@ try {
  source='const {fs,util,http,bridge,readPrivate,writePrivate,DIRECT_PROFILE,BLOCK_IPV6_PROFILE}=globalThis.__profileEnv;\n'+source;
  const api=await import('data:text/javascript;base64,'+Buffer.from(stripTypeScriptTypes(source,{mode:'strip'})).toString('base64'));
  assert.equal(api.defaultSettings().locationAssist,false);
- writePrivate(path.join(root,'settings.json'),JSON.stringify({autoReconnect:true}));assert.equal(api.loadSettings(root).locationAssist,false,'legacy settings must not silently enable location');
+ assert.equal(api.defaultSettings().blackholeOnSwitch,true);
+ assert.deepEqual(api.defaultSettings().ssidPolicies,[]);
+ writePrivate(path.join(root,'settings.json'),JSON.stringify({autoReconnect:true}));
+ const legacySettings=api.loadSettings(root);
+ assert.equal(legacySettings.locationAssist,false,'legacy settings must not silently enable location');
+ assert.equal(legacySettings.blackholeOnSwitch,true,'legacy settings must default blackholeOnSwitch to true');
+ assert.deepEqual(legacySettings.ssidPolicies,[],'legacy settings must default ssidPolicies to empty array');
+ api.saveSettings(root,{...api.defaultSettings(),blackholeOnSwitch:false,ssidPolicies:[{ssid:'HomeWiFi',action:'mode',mode:'direct'},{ssid:'Office',action:'pause'}]});
+ const savedSettings=api.loadSettings(root);
+ assert.equal(savedSettings.blackholeOnSwitch,false);
+ assert.deepEqual(savedSettings.ssidPolicies,[{ssid:'HomeWiFi',action:'mode',mode:'direct'},{ssid:'Office',action:'pause'}]);
  writePrivate(path.join(root,'profile.json'),config('original'));
  let lib=api.loadLibrary(root);const first=lib.selected;
  assert.equal(api.readProfile(root,first),config('original'));
